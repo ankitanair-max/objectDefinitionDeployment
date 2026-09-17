@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Self-test: translation delta (NEW field add vs already-translated object).
 
-Run from sf-deploy/:  python3 scripts/test_i18n_delta.py
+Run from sf-deploy/:  python3 scripts/test_translation_delta.py
 No org, no sheet — exercises classify + apply_new_only + merge.
 """
 from __future__ import annotations
@@ -9,7 +9,7 @@ from __future__ import annotations
 import sys
 
 sys.path.insert(0, "scripts")
-from i18n_lib import (  # noqa: E402
+from translation_lib import (  # noqa: E402
     CHANGED, KIND_OBJECT_FIELD, MISSING, NEW, UNCHANGED, apply_new_only,
     classify, content_hash, make_entry,
 )
@@ -69,7 +69,7 @@ def test_hash_utf8():
 
 
 def main() -> int:
-    print("test_i18n_delta")
+    print("test_translation_delta")
     test_japan_adds_one_field()
     test_changed_en_not_packaged_new_only()
     test_hash_utf8()

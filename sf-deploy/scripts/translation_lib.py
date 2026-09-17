@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-i18n_lib.py — shared primitives for the translation pipeline.
+translation_lib.py — shared primitives for the translation pipeline.
 
 Mirrors the object-definition pipeline:
   * Google Sheet is the source of truth (live reads only):
@@ -9,7 +9,7 @@ Mirrors the object-definition pipeline:
   * Delta is key-based + content-hash; unchanged translations are not redeployed.
   * Conflicts (sheet AND org both drifted from last successful deploy) are parked.
 
-This module has no CLI. Import from fetch_i18n / validate_i18n / i18n_drift /
+This module has no CLI. Import from fetch_translations / validate_translations / translation_drift /
 generate_object_translation.
 """
 from __future__ import annotations
@@ -54,7 +54,7 @@ KIND_OBJECT_HELP = "ObjectHelp"
 KIND_OBJECT_REL = "ObjectRelationshipLabel"
 KIND_OBJECT_PICKLIST = "ObjectPicklist"
 
-# Codes used by i18n_drift / generators.
+# Codes used by translation_drift / generators.
 NEW = "NEW_TRANSLATION"
 CHANGED = "CHANGED"
 UNCHANGED = "UNCHANGED"
@@ -293,7 +293,7 @@ def apply_new_only(classified: list[dict]) -> list[dict]:
     return classified
 
 
-def load_sync_state(path: str | Path = ".build/i18n_sync_state.json") -> dict:
+def load_sync_state(path: str | Path = ".build/translation_sync_state.json") -> dict:
     p = Path(path)
     if not p.exists():
         return {"entries": {}}
@@ -304,7 +304,7 @@ def load_sync_state(path: str | Path = ".build/i18n_sync_state.json") -> dict:
 
 
 def save_sync_state(entries: list[dict], org: str,
-                    path: str | Path = ".build/i18n_sync_state.json") -> None:
+                    path: str | Path = ".build/translation_sync_state.json") -> None:
     import datetime
     p = Path(path)
     prev = load_sync_state(p)

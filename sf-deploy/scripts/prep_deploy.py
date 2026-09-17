@@ -187,19 +187,19 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str]]:
     for o in objs:
         for p in Path("force-app/main/default/objectTranslations").glob(f"{o}-*"):
             shutil.rmtree(p, ignore_errors=True)
-    run(["python3", "scripts/fetch_i18n.py",
+    run(["python3", "scripts/fetch_translations.py",
          "--spreadsheet-id", args.sheet_id,
          "--from-object-rows", str(temp_path),
-         "--out", ".build/i18n_catalog_objects.json"],
+         "--out", ".build/translation_catalog_objects.json"],
         google_env(args), capture=True)
-    run(["python3", "scripts/i18n_drift.py",
-         "--catalog", ".build/i18n_catalog_objects.json",
+    run(["python3", "scripts/translation_drift.py",
+         "--catalog", ".build/translation_catalog_objects.json",
          "--org", args.org, "--lang", "en_US", "--new-only",
-         "--out", ".build/i18n_drift_objects.json"],
+         "--out", ".build/translation_drift_objects.json"],
         sf_env(args), capture=True)
     run(["python3", "scripts/generate_object_translation.py",
          "--rows", str(temp_path), "--org", args.org, "--lang", "en_US",
-         "--delta", ".build/i18n_drift_objects.json"],
+         "--delta", ".build/translation_drift_objects.json"],
         sf_env(args), capture=True)
 
     # 5) build ONE manifest for the whole batch

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-verify_i18n.py — post-deploy live check that packaged object translations landed.
+verify_translations.py — post-deploy live check that packaged object translations landed.
 
 Reads the delta JSON (only rows with package=true) and re-reads the org via
 Metadata API CustomObjectTranslation. Exit 0 = every packaged translation
 matches the sheet text.
 
 Usage:
-  python scripts/verify_i18n.py --delta .build/i18n_drift.json --org ERPDEV01 --lang en_US
+  python scripts/verify_translations.py --delta .build/translation_drift.json --org ERPDEV01 --lang en_US
 """
 from __future__ import annotations
 
@@ -17,14 +17,14 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, "scripts")
-from i18n_lib import (  # noqa: E402
+from translation_lib import (  # noqa: E402
     content_hash, load_token, parse_object_translation, read_metadata,
 )
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Verify packaged object translations in the org")
-    ap.add_argument("--delta", default=".build/i18n_drift.json")
+    ap.add_argument("--delta", default=".build/translation_drift.json")
     ap.add_argument("--org", required=True)
     ap.add_argument("--lang", default="en_US")
     args = ap.parse_args()
@@ -32,7 +32,7 @@ def main() -> int:
     delta = json.loads(Path(args.delta).read_text(encoding="utf-8"))
     expected = [e for e in delta if e.get("package")]
     if not expected:
-        print("verify_i18n: nothing was packaged — nothing to verify.")
+        print("verify_translations: nothing was packaged — nothing to verify.")
         return 0
 
     a = load_token(args.org)
@@ -61,7 +61,7 @@ def main() -> int:
             mismatch.append((e["id"], e.get("translation"), got.get("translation")))
 
     print("=" * 72)
-    print(f"  verify_i18n  packaged={len(expected)}  missing={len(missing)}  mismatch={len(mismatch)}")
+    print(f"  verify_translations  packaged={len(expected)}  missing={len(missing)}  mismatch={len(mismatch)}")
     print("=" * 72)
     for i in missing:
         print(f"  MISSING   {i}")

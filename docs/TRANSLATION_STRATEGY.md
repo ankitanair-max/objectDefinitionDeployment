@@ -76,7 +76,7 @@ For each object in the deploy set:
 **When Japan adds a field later** (the object already has translations):
 
 1. They add the row on the object tab: JA in `Field Label`, EN in **column D** (`Field Label (EN)`), API name in `fullName`.
-2. Next `prep_deploy.py` for that tab: field name-delta creates the CustomField; `i18n_drift.py --new-only` marks only that row `NEW_TRANSLATION`.
+2. Next `prep_deploy.py` for that tab: field name-delta creates the CustomField; `translation_drift.py --new-only` marks only that row `NEW_TRANSLATION`.
 3. `generate_object_translation.py` merges that one EN into the org COT and packages it. Existing translations are left as they are.
 
 No extra spreadsheet, no extra “run translations” command. Blank col D on the new row → field still deploys; WARN `MISSING_TRANSLATION`.
@@ -96,7 +96,7 @@ Scripts:
 | Script | Role |
 |---|---|
 | `generate_object_translation.py` | From live rows → `<Obj>__c-en_US.objectTranslation-meta.xml` (retrieve-merge org file + new EN) |
-| `i18n_drift.py` | Compare sheet EN vs org CustomObjectTranslation |
+| `translation_drift.py` | Compare sheet EN vs org CustomObjectTranslation |
 | `prep_deploy.py` | Always run translation delta for in-scope tabs (Step 4b) |
 
 Salesforce note: `CustomObjectTranslation` is usually deployed as a **whole object-language file**. Practical approach: retrieve-or-rebuild the `en_US` file for that object from **all current sheet EN cells** (not only the new field), so adding one field merges into the existing translation file rather than wiping other fields. That is still “automatic delta” from the operator’s point of view: they only edit the new row.

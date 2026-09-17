@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-validate_i18n.py — HARD GATE for object-tab English (CustomObjectTranslation).
+validate_translations.py — HARD GATE for object-tab English (CustomObjectTranslation).
 
-Reads `.build/i18n_catalog.json` (from fetch_i18n.py) and reports ERROR/WARN
+Reads `.build/translation_catalog.json` (from fetch_translations.py) and reports ERROR/WARN
 before any XML is generated. Exit 1 when any ERROR is present.
 
 Checks:
@@ -16,8 +16,8 @@ Blank translation cells are WARN (MISSING_TRANSLATION): do not invent English.
 Flip to ERROR with --strict-missing.
 
 Usage:
-  python scripts/validate_i18n.py --in .build/i18n_catalog.json \
-      --json .build/i18n_validation.json [--org ERPDEV01] [--strict-missing]
+  python scripts/validate_translations.py --in .build/translation_catalog.json \
+      --json .build/translation_validation.json [--org ERPDEV01] [--strict-missing]
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, "scripts")
-from i18n_lib import (  # noqa: E402
+from translation_lib import (  # noqa: E402
     KIND_OBJECT_FIELD, KIND_OBJECT_PICKLIST,
     load_token, read_metadata, norm,
 )
@@ -91,8 +91,8 @@ def org_picklist_masters(obj: str, field: str, tok, inst, ver) -> set[str] | Non
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Validate object-translation catalog (hard gate)")
-    ap.add_argument("--in", dest="inp", default=".build/i18n_catalog.json")
-    ap.add_argument("--json", dest="out", default=".build/i18n_validation.json")
+    ap.add_argument("--in", dest="inp", default=".build/translation_catalog.json")
+    ap.add_argument("--json", dest="out", default=".build/translation_validation.json")
     ap.add_argument("--org", default="")
     ap.add_argument("--strict-missing", action="store_true",
                     help="blank translation cells become ERROR instead of WARN")
@@ -100,7 +100,7 @@ def main() -> int:
 
     entries = json.loads(Path(args.inp).read_text(encoding="utf-8"))
     rep = Report()
-    print(f"validate_i18n: {len(entries)} catalog entr(y/ies)")
+    print(f"validate_translations: {len(entries)} catalog entr(y/ies)")
 
     seen_ids: dict[str, str] = {}
     for e in entries:

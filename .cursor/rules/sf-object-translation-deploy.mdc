@@ -1,6 +1,6 @@
 ---
-description: Object-tab English lives in column D (Field Label (EN)). Future field adds on already-translated objects are picked up by i18n_drift --new-only in the same prep_deploy as the field delta.
-globs: sf-deploy/scripts/{fetch_sheet,fetch_i18n,i18n_*,generate_object_translation,prep_deploy,generate_xml}.py
+description: Object-tab English lives in column D (Field Label (EN)). Future field adds on already-translated objects are picked up by translation_drift --new-only in the same prep_deploy as the field delta.
+globs: sf-deploy/scripts/{fetch_sheet,fetch_translations,translation_*,generate_object_translation,prep_deploy,generate_xml}.py
 alwaysApply: false
 ---
 
@@ -15,7 +15,7 @@ Japanese `Field Label` (col C) remains `CustomField.label`. Locate the EN column
 When a field is added to an object that already has translations:
 
 1. Sheet row: JA in `Field Label`, EN in `Field Label (EN)` / col D, API in `fullName`. Honor WIP / IsDelete / `END[項目]` like every other field row.
-2. `prep_deploy.py` Step 4b runs `i18n_drift.py --new-only` against live `CustomObjectTranslation`.
+2. `prep_deploy.py` Step 4b runs `translation_drift.py --new-only` against live `CustomObjectTranslation`.
 3. Package **only** `NEW_TRANSLATION` (EN filled, no `en_US` translation in the org). `CHANGED_EN` is reported, not auto-packaged.
 4. `generate_object_translation.py` **retrieves the org COT and merges the new field** so sibling translations are not wiped. The member `CustomObjectTranslation:<Obj>__c-en_US` rides in the **same** package as the new CustomField.
 

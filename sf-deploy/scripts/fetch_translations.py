@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-fetch_i18n.py — convert live object-tab rows into a translation catalog.
+fetch_translations.py — convert live object-tab rows into a translation catalog.
 
 Source of truth: the Data Dictionary Google Sheet
   https://docs.google.com/spreadsheets/d/1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ
@@ -11,8 +11,8 @@ read a cached snapshot of the sheet: it consumes ``temp_updates.json`` produced
 by a live ``fetch_sheet.py`` of those object tabs.
 
 Usage:
-  python scripts/fetch_i18n.py --from-object-rows temp_updates.json \
-      --out .build/i18n_catalog.json
+  python scripts/fetch_translations.py --from-object-rows temp_updates.json \
+      --out .build/translation_catalog.json
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, "scripts")
-from i18n_lib import (  # noqa: E402
+from translation_lib import (  # noqa: E402
     KIND_NAME_FIELD, KIND_OBJECT_FIELD, KIND_OBJECT_HELP,
     KIND_OBJECT_LABEL, KIND_OBJECT_PICKLIST, KIND_OBJECT_REL, DEFAULT_LANG,
     make_entry, parse_picklist_en, parse_picklist_entries, norm,
@@ -36,7 +36,7 @@ DEFAULT_SHEET_URL = (
 
 
 def entries_from_object_rows(rows: list[dict], lang: str = DEFAULT_LANG) -> list[dict]:
-    """Convert fetch_sheet.py object/field rows into i18n catalog entries."""
+    """Convert fetch_sheet.py object/field rows into translation catalog entries."""
     out: list[dict] = []
     for r in rows:
         obj = norm(r.get("Object API Name"))
@@ -102,7 +102,7 @@ def main() -> int:
     ap.add_argument("--from-object-rows", required=True,
                     help="temp_updates.json from a live fetch_sheet.py of object tabs")
     ap.add_argument("--lang", default=DEFAULT_LANG)
-    ap.add_argument("--out", default=".build/i18n_catalog.json")
+    ap.add_argument("--out", default=".build/translation_catalog.json")
     args = ap.parse_args()
 
     print(f"Spreadsheet SoT: {DEFAULT_SHEET_URL}  id={args.spreadsheet_id}")

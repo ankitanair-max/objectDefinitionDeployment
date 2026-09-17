@@ -10,14 +10,14 @@ CustomField.label.
 
 Future delta (Japan adds a field to an already-translated object):
   1. They add the row (JA in C, EN in D, API in E after the EN-column insert).
-  2. i18n_drift --new-only marks that field NEW_TRANSLATION.
+  2. translation_drift --new-only marks that field NEW_TRANSLATION.
   3. This script retrieves the org's existing <Obj>-en_US translation, MERGES
      only the new field's EN, and writes the combined file so siblings are not
      untranslated. Existing translations are not redeployed as a change set.
 
 Usage:
   python scripts/generate_object_translation.py --rows temp_updates.json \
-      --org ERPDEV01 --lang en_US --delta .build/i18n_drift_objects.json
+      --org ERPDEV01 --lang en_US --delta .build/translation_drift_objects.json
 """
 from __future__ import annotations
 
@@ -28,8 +28,8 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, "scripts")
-from fetch_i18n import entries_from_object_rows  # noqa: E402
-from i18n_lib import (  # noqa: E402
+from fetch_translations import entries_from_object_rows  # noqa: E402
+from translation_lib import (  # noqa: E402
     CHANGED, CONFLICT, DEFAULT_LANG, KIND_NAME_FIELD, KIND_OBJECT_FIELD,
     KIND_OBJECT_HELP, KIND_OBJECT_LABEL, KIND_OBJECT_PICKLIST, KIND_OBJECT_REL,
     NEW, esc, load_token, parse_object_translation, read_metadata, write_xml,
@@ -125,8 +125,8 @@ def render_field_file(field: str, entries: list[dict]) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Generate CustomObjectTranslation XML")
     ap.add_argument("--rows", default="", help="temp_updates.json from fetch_sheet.py")
-    ap.add_argument("--catalog", default="", help="i18n_catalog.json")
-    ap.add_argument("--delta", default="", help="i18n_drift.json — only objects with PKG rows")
+    ap.add_argument("--catalog", default="", help="translation_catalog.json")
+    ap.add_argument("--delta", default="", help="translation_drift.json — only objects with PKG rows")
     ap.add_argument("--org", default="")
     ap.add_argument("--lang", default=DEFAULT_LANG)
     ap.add_argument("--out-root", default=str(OUT_ROOT))

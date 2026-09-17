@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-i18n_drift.py — sheet (live catalog) vs org (live Metadata API) translation delta.
+translation_drift.py — sheet (live catalog) vs org (live Metadata API) translation delta.
 
 Same role as attr_drift.py, for translations:
   name-existence is not enough — compare the TRANSLATION TEXT (hash) too.
 
 Usage:
-  python scripts/i18n_drift.py --catalog .build/i18n_catalog.json --org ERPDEV01 \
-      [--lang en_US] [--conflict park] [--out .build/i18n_drift.json]
+  python scripts/translation_drift.py --catalog .build/translation_catalog.json --org ERPDEV01 \
+      [--lang en_US] [--conflict park] [--out .build/translation_drift.json]
 
 Exit 0 always (report-only) unless --fail-on-conflict.
 """
@@ -20,7 +20,7 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, "scripts")
-from i18n_lib import (  # noqa: E402
+from translation_lib import (  # noqa: E402
     CHANGED, CONFLICT, DEFAULT_LANG, INVALID_LANG,
     KIND_OBJECT_FIELD, KIND_OBJECT_HELP, KIND_OBJECT_LABEL, KIND_OBJECT_PICKLIST,
     KIND_OBJECT_REL, KIND_NAME_FIELD, MISSING, NEW, ORG_ONLY, UNCHANGED,
@@ -56,7 +56,7 @@ def org_index(entries: list[dict], org: str, lang: str) -> dict[str, dict]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Sheet vs org translation drift")
-    ap.add_argument("--catalog", default=".build/i18n_catalog.json")
+    ap.add_argument("--catalog", default=".build/translation_catalog.json")
     ap.add_argument("--org", required=True)
     ap.add_argument("--lang", default=DEFAULT_LANG)
     ap.add_argument("--conflict", default="park",
@@ -64,15 +64,15 @@ def main() -> int:
     ap.add_argument("--new-only", action="store_true",
                     help="package NEW_TRANSLATION only (future field adds on "
                          "already-translated objects). CHANGED is reported, not packaged.")
-    ap.add_argument("--sync-state", default=".build/i18n_sync_state.json")
-    ap.add_argument("--out", default=".build/i18n_drift.json")
+    ap.add_argument("--sync-state", default=".build/translation_sync_state.json")
+    ap.add_argument("--out", default=".build/translation_drift.json")
     ap.add_argument("--fail-on-conflict", action="store_true")
     args = ap.parse_args()
 
     sheet = json.loads(Path(args.catalog).read_text(encoding="utf-8"))
     # Only compare the requested language
     sheet = [e for e in sheet if e.get("language", args.lang) == args.lang]
-    print(f"i18n_drift  org={args.org}  lang={args.lang}  sheet={len(sheet)}")
+    print(f"translation_drift  org={args.org}  lang={args.lang}  sheet={len(sheet)}")
 
     org_by_id = org_index(sheet, args.org, args.lang)
     sync = load_sync_state(args.sync_state).get("entries") or {}
