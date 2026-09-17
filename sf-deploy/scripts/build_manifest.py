@@ -41,6 +41,10 @@ import xml.sax.saxutils as sx
 TYPE_ORDER = [
     "CustomObject",
     "CustomField",
+    "CustomLabels",
+    "CustomObjectTranslation",
+    "GlobalValueSetTranslation",
+    "Translations",
     "RecordType",
     "Layout",
     "FlexiPage",
@@ -60,7 +64,8 @@ def default_api_version(root: Path) -> str:
     return "60.0"
 
 
-def discover(source_root: Path, only: set[str] | None) -> dict[str, list[str]]:
+def discover(source_root: Path, only: set[str] | None,
+             only_types: set[str] | None = None) -> dict[str, list[str]]:
     members: dict[str, set[str]] = defaultdict(set)
     objects_dir = source_root / "objects"
 
@@ -79,6 +84,33 @@ def discover(source_root: Path, only: set[str] | None) -> dict[str, list[str]]:
             if rt_dir.is_dir():
                 for f in sorted(rt_dir.glob("*.recordType-meta.xml")):
                     members["RecordType"].add(f"{obj}.{f.name[:-len('.recordType-meta.xml')]}")
+
+    # CustomObjectTranslation: folder objectTranslations/<Obj>-<lang>/
+    ot_dir = source_root / "objectTranslations"
+    if ot_dir.is_dir():
+        for folder in sorted(p for p in ot_dir.iterdir() if p.is_dir()):
+            member = folder.name  # e.g. TI_Fnt_Deal__c-en_US
+            obj = member.rsplit("-", 1)[0]
+            if only and obj not in only:
+                continue
+            meta = folder / f"{member}.objectTranslation-meta.xml"
+            if meta.exists():
+                members["CustomObjectTranslation"].add(member)
+
+    gvs_dir = source_root / "globalValueSetTranslations"
+    if gvs_dir.is_dir() and not only:
+        for f in sorted(gvs_dir.glob("*.globalValueSetTranslation-meta.xml")):
+            members["GlobalValueSetTranslation"].add(
+                f.name[: -len(".globalValueSetTranslation-meta.xml")])
+
+    labels = source_root / "labels" / "CustomLabels.labels-meta.xml"
+    if labels.exists() and not only:
+        members["CustomLabels"].add("CustomLabels")
+
+    tr_dir = source_root / "translations"
+    if tr_dir.is_dir() and not only:
+        for f in sorted(tr_dir.glob("*.translation-meta.xml")):
+            members["Translations"].add(f.name[: -len(".translation-meta.xml")])
 
     simple = {
         "Layout": ("layouts", ".layout-meta.xml"),
@@ -108,7 +140,10 @@ def discover(source_root: Path, only: set[str] | None) -> dict[str, list[str]]:
                     continue
             members[mtype].add(name)
 
-    return {k: sorted(v) for k, v in members.items()}
+    result = {k: sorted(v) for k, v in members.items()}
+    if only_types:
+        result = {k: v for k, v in result.items() if k in only_types}
+    return result
 
 
 def render_package(members: dict[str, list[str]], api_version: str) -> str:
@@ -151,6 +186,8 @@ def main() -> int:
     ap.add_argument("--out", default="manifest/package.xml")
     ap.add_argument("--api-version", default="")
     ap.add_argument("--only", default="", help="comma-separated object API names to restrict to")
+    ap.add_argument("--types", default="",
+                    help="comma-separated metadata types to include (e.g. CustomLabels,Translations)")
     ap.add_argument("--destroy", default="", help="deletions.json path")
     ap.add_argument("--destroy-out", default="manifest/destructiveChanges.xml")
     ap.add_argument("--project-root", default=".")
@@ -160,12 +197,13 @@ def main() -> int:
     api_version = args.api_version or default_api_version(proj_root)
     source_root = Path(args.source_root)
     only = {o.strip() for o in args.only.split(",") if o.strip()} or None
+    only_types = {t.strip() for t in args.types.split(",") if t.strip()} or None
 
     if not source_root.is_dir():
         print(f"❌ source root '{source_root}' not found — run the generators first.")
         return 1
 
-    members = discover(source_root, only)
+    members = discover(source_root, only, only_types)
     total = sum(len(v) for v in members.values())
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
