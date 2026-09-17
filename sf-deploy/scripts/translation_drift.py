@@ -6,8 +6,8 @@ Same role as attr_drift.py, for translations:
   name-existence is not enough — compare the TRANSLATION TEXT (hash) too.
 
 Usage:
-  python scripts/translation_drift.py --catalog .build/translation_catalog.json --org ERPDEV01 \
-      [--lang en_US] [--conflict park] [--out .build/translation_drift.json]
+  python scripts/translation_drift.py --rows temp_updates.json --org ERPDEV01 \
+      [--lang en_US] [--new-only] [--out .build/translation_drift.json]
 
 Exit 0 always (report-only) unless --fail-on-conflict.
 """
@@ -24,8 +24,8 @@ from translation_lib import (  # noqa: E402
     CHANGED, CONFLICT, DEFAULT_LANG, INVALID_LANG,
     KIND_OBJECT_FIELD, KIND_OBJECT_HELP, KIND_OBJECT_LABEL, KIND_OBJECT_PICKLIST,
     KIND_OBJECT_REL, KIND_NAME_FIELD, MISSING, NEW, ORG_ONLY, UNCHANGED,
-    apply_new_only, classify, load_sync_state, load_token, parse_object_translation,
-    read_metadata,
+    apply_new_only, classify, entries_from_object_rows, load_sync_state,
+    load_token, parse_object_translation, read_metadata,
 )
 
 
@@ -56,7 +56,10 @@ def org_index(entries: list[dict], org: str, lang: str) -> dict[str, dict]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Sheet vs org translation drift")
-    ap.add_argument("--catalog", default=".build/translation_catalog.json")
+    ap.add_argument("--rows", default="",
+                    help="temp_updates.json from a live fetch_sheet.py")
+    ap.add_argument("--catalog", default="",
+                    help="optional pre-built catalog JSON (instead of --rows)")
     ap.add_argument("--org", required=True)
     ap.add_argument("--lang", default=DEFAULT_LANG)
     ap.add_argument("--conflict", default="park",
@@ -69,8 +72,15 @@ def main() -> int:
     ap.add_argument("--fail-on-conflict", action="store_true")
     args = ap.parse_args()
 
-    sheet = json.loads(Path(args.catalog).read_text(encoding="utf-8"))
-    # Only compare the requested language
+    sheet: list[dict] = []
+    if args.catalog:
+        sheet.extend(json.loads(Path(args.catalog).read_text(encoding="utf-8")))
+    if args.rows:
+        rows = json.loads(Path(args.rows).read_text(encoding="utf-8"))
+        sheet.extend(entries_from_object_rows(rows, lang=args.lang))
+    if not sheet:
+        print("❌ translation_drift: pass --rows temp_updates.json (or --catalog)")
+        return 1
     sheet = [e for e in sheet if e.get("language", args.lang) == args.lang]
     print(f"translation_drift  org={args.org}  lang={args.lang}  sheet={len(sheet)}")
 

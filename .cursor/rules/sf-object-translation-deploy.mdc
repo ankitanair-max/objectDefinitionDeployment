@@ -1,6 +1,6 @@
 ---
 description: Object-tab English lives in column D (Field Label (EN)). Future field adds on already-translated objects are picked up by translation_drift --new-only in the same prep_deploy as the field delta.
-globs: sf-deploy/scripts/{fetch_sheet,fetch_translations,translation_*,generate_object_translation,prep_deploy,generate_xml}.py
+globs: sf-deploy/scripts/{fetch_sheet,translation_lib,translation_drift,generate_object_translation,prep_deploy,generate_xml}.py
 alwaysApply: false
 ---
 

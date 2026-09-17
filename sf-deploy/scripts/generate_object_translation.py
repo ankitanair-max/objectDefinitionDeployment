@@ -28,11 +28,11 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, "scripts")
-from fetch_translations import entries_from_object_rows  # noqa: E402
 from translation_lib import (  # noqa: E402
-    CHANGED, CONFLICT, DEFAULT_LANG, KIND_NAME_FIELD, KIND_OBJECT_FIELD,
-    KIND_OBJECT_HELP, KIND_OBJECT_LABEL, KIND_OBJECT_PICKLIST, KIND_OBJECT_REL,
-    NEW, esc, load_token, parse_object_translation, read_metadata, write_xml,
+    DEFAULT_LANG, KIND_NAME_FIELD, KIND_OBJECT_FIELD, KIND_OBJECT_HELP,
+    KIND_OBJECT_LABEL, KIND_OBJECT_PICKLIST, KIND_OBJECT_REL,
+    entries_from_object_rows, esc, load_token, parse_object_translation,
+    read_metadata, write_xml,
 )
 
 OUT_ROOT = Path("force-app/main/default/objectTranslations")

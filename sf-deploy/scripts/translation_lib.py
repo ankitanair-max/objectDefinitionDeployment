@@ -9,8 +9,7 @@ Mirrors the object-definition pipeline:
   * Delta is key-based + content-hash; unchanged translations are not redeployed.
   * Conflicts (sheet AND org both drifted from last successful deploy) are parked.
 
-This module has no CLI. Import from fetch_translations / validate_translations / translation_drift /
-generate_object_translation.
+This module has no CLI. Import from translation_drift / generate_object_translation.
 """
 from __future__ import annotations
 
@@ -199,6 +198,65 @@ def make_entry(*, kind: str, component: str, aspect: str, key: str,
     if extra:
         e.update(extra)
     return e
+
+
+def entries_from_object_rows(rows: list[dict], lang: str = DEFAULT_LANG) -> list[dict]:
+    """Convert fetch_sheet.py object/field rows into translation catalog entries."""
+    out: list[dict] = []
+    for r in rows:
+        obj = norm(r.get("Object API Name"))
+        if not obj:
+            continue
+        source = f"object_tab:{r.get('_SheetName') or obj}"
+        if r.get("_type") == "object_meta":
+            en = norm(r.get("Object Label (EN)"))
+            e = make_entry(kind=KIND_OBJECT_LABEL, component=obj, aspect="label",
+                           key=obj, language=lang, master=norm(r.get("Object Label")),
+                           translation=en, source=source)
+            out.append(e)
+            name_en = norm(r.get("Name Field Label (EN)"))
+            e = make_entry(kind=KIND_NAME_FIELD, component=obj, aspect="label",
+                           key="Name", language=lang,
+                           master=norm(r.get("Name Field Label")),
+                           translation=name_en, source=source)
+            out.append(e)
+            continue
+        api = norm(r.get("Field API Name"))
+        if not api.endswith("__c"):
+            continue
+        e = make_entry(kind=KIND_OBJECT_FIELD, component=obj, aspect="label",
+                       key=api, language=lang, master=norm(r.get("Field Label")),
+                       translation=norm(r.get("Field Label (EN)")), source=source)
+        out.append(e)
+        help_en = norm(r.get("Help Text (EN)"))
+        if help_en or norm(r.get("Help Text")):
+            out.append(make_entry(kind=KIND_OBJECT_HELP, component=obj, aspect="help",
+                                  key=api, language=lang, master=norm(r.get("Help Text")),
+                                  translation=help_en, source=source))
+        rel_en = norm(r.get("Relationship Label (EN)"))
+        if rel_en:
+            out.append(make_entry(kind=KIND_OBJECT_REL, component=obj,
+                                  aspect="relationshipLabel", key=api, language=lang,
+                                  master=norm(r.get("Relationship Label")),
+                                  translation=rel_en, source=source))
+        dt = norm(r.get("Data Type")).lower()
+        if "picklist" in dt:
+            masters = [lbl for lbl, _api in parse_picklist_entries(
+                r.get("Type Specific Value") or r.get("Picklist Values") or "")]
+            pairs, err = parse_picklist_en(r.get("Picklist Values (EN)") or "", masters)
+            if err and norm(r.get("Picklist Values (EN)")):
+                out.append(make_entry(
+                    kind=KIND_OBJECT_PICKLIST, component=obj, aspect="picklist",
+                    key=f"{api}::__parse__", language=lang, master="",
+                    translation="", source=source,
+                    extra={"parse_error": err, "field": api}))
+            for master, trans in pairs:
+                out.append(make_entry(
+                    kind=KIND_OBJECT_PICKLIST, component=obj, aspect="picklist",
+                    key=f"{api}::{master}", language=lang, master=master,
+                    translation=trans, source=source,
+                    extra={"field": api}))
+    return out
 
 
 # --------------------------------------------------------------------------- #

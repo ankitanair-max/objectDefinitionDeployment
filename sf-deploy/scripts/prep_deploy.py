@@ -187,13 +187,8 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str]]:
     for o in objs:
         for p in Path("force-app/main/default/objectTranslations").glob(f"{o}-*"):
             shutil.rmtree(p, ignore_errors=True)
-    run(["python3", "scripts/fetch_translations.py",
-         "--spreadsheet-id", args.sheet_id,
-         "--from-object-rows", str(temp_path),
-         "--out", ".build/translation_catalog_objects.json"],
-        google_env(args), capture=True)
     run(["python3", "scripts/translation_drift.py",
-         "--catalog", ".build/translation_catalog_objects.json",
+         "--rows", str(temp_path),
          "--org", args.org, "--lang", "en_US", "--new-only",
          "--out", ".build/translation_drift_objects.json"],
         sf_env(args), capture=True)

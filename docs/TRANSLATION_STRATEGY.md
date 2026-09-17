@@ -95,9 +95,10 @@ Scripts:
 
 | Script | Role |
 |---|---|
-| `generate_object_translation.py` | From live rows → `<Obj>__c-en_US.objectTranslation-meta.xml` (retrieve-merge org file + new EN) |
-| `translation_drift.py` | Compare sheet EN vs org CustomObjectTranslation |
-| `prep_deploy.py` | Always run translation delta for in-scope tabs (Step 4b) |
+| `translation_lib.py` | Shared hash / classify / sheet-row → catalog (no CLI) |
+| `translation_drift.py` | Compare sheet EN vs live org CustomObjectTranslation (`--new-only`) |
+| `generate_object_translation.py` | Retrieve-merge org file + new EN → `<Obj>__c-en_US` XML |
+| `prep_deploy.py` | Step 4b: drift then generate, same package as the fields |
 
 Salesforce note: `CustomObjectTranslation` is usually deployed as a **whole object-language file**. Practical approach: retrieve-or-rebuild the `en_US` file for that object from **all current sheet EN cells** (not only the new field), so adding one field merges into the existing translation file rather than wiping other fields. That is still “automatic delta” from the operator’s point of view: they only edit the new row.
 
