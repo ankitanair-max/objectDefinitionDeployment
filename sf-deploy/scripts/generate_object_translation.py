@@ -2,9 +2,11 @@
 """
 generate_object_translation.py — CustomObjectTranslation XML from col D EN.
 
-Source of truth: the object-definition tab. English lives in **column D**,
-header ``Field Label (EN)`` (same layout as the 20 objects filled 2026-09-17).
-Japanese in ``Field Label`` (col C) stays CustomField.label.
+Source of truth: the object-definition tab on the live Data Dictionary sheet
+https://docs.google.com/spreadsheets/d/1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ
+English lives in **column D**, header ``Field Label (EN)`` (same layout as the
+20 objects filled 2026-09-17). Japanese in ``Field Label`` (col C) stays
+CustomField.label.
 
 Future delta (Japan adds a field to an already-translated object):
   1. They add the row (JA in C, EN in D, API in E after the EN-column insert).

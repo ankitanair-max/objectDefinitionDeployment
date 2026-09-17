@@ -45,6 +45,7 @@ import sys
 from pathlib import Path
 
 DEFAULT_SHEET_ID = "1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ"
+# Live Data Dictionary: https://docs.google.com/spreadsheets/d/1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ
 OBJECTS_ROOT = Path("force-app/main/default/objects")
 VALIDATION_REPORT = Path(".build/validation_report.json")
 PACKAGE = Path("manifest/package.xml")
@@ -187,7 +188,7 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str]]:
         for p in Path("force-app/main/default/objectTranslations").glob(f"{o}-*"):
             shutil.rmtree(p, ignore_errors=True)
     run(["python3", "scripts/fetch_i18n.py",
-         "--spreadsheet-id", args.sheet_id, "--no-catalog-tabs",
+         "--spreadsheet-id", args.sheet_id,
          "--from-object-rows", str(temp_path),
          "--out", ".build/i18n_catalog_objects.json"],
         google_env(args), capture=True)

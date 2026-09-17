@@ -21,21 +21,19 @@ from pathlib import Path
 
 sys.path.insert(0, "scripts")
 from i18n_lib import (  # noqa: E402
-    CHANGED, CONFLICT, DEFAULT_LANG, INVALID_LANG, KIND_CUSTOM_LABEL,
+    CHANGED, CONFLICT, DEFAULT_LANG, INVALID_LANG,
     KIND_OBJECT_FIELD, KIND_OBJECT_HELP, KIND_OBJECT_LABEL, KIND_OBJECT_PICKLIST,
     KIND_OBJECT_REL, KIND_NAME_FIELD, MISSING, NEW, ORG_ONLY, UNCHANGED,
     apply_new_only, classify, load_sync_state, load_token, parse_object_translation,
-    parse_translations, read_metadata,
+    read_metadata,
 )
 
 
 def org_index(entries: list[dict], org: str, lang: str) -> dict[str, dict]:
-    kinds = {e["kind"] for e in entries}
     objs = sorted({e["component"] for e in entries
                    if e["kind"] in {KIND_OBJECT_FIELD, KIND_OBJECT_HELP,
                                     KIND_OBJECT_LABEL, KIND_OBJECT_PICKLIST,
                                     KIND_OBJECT_REL, KIND_NAME_FIELD}})
-    need_translations = any(k == KIND_CUSTOM_LABEL or k.startswith("Flow") for k in kinds)
 
     tokinfo = load_token(org)
     tok, inst, ver = (tokinfo["accessToken"],
@@ -46,21 +44,13 @@ def org_index(entries: list[dict], org: str, lang: str) -> dict[str, dict]:
     if objs:
         members = [f"{o}-{lang}" for o in objs]
         recs = read_metadata("CustomObjectTranslation", members, tok, inst, ver)
-        for rec, obj in zip(recs, [r.findtext("fullName") or "" for r in recs] or objs):
-            # fullName on COT is "Obj__c-en_US"
+        for rec in recs:
             fn = (rec.findtext("fullName") or "").strip()
             obj_api = fn.rsplit("-", 1)[0] if fn else ""
             if not obj_api:
                 continue
             idx.update(parse_object_translation(rec, obj_api, lang))
-        print(f"  org CustomObjectTranslation {lang}: {len([k for k in idx if 'Object' in k.split('|')[0]])} key(s)")
-
-    if need_translations:
-        recs = read_metadata("Translations", [lang], tok, inst, ver)
-        n_before = len(idx)
-        for rec in recs:
-            idx.update(parse_translations(rec, lang))
-        print(f"  org Translations {lang}: {len(idx) - n_before} key(s)")
+        print(f"  org CustomObjectTranslation {lang}: {len(idx)} key(s)")
     return idx
 
 

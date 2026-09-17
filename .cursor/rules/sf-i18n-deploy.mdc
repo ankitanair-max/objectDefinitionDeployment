@@ -6,7 +6,9 @@ alwaysApply: false
 
 # Object translation delta (column D EN + new-field only)
 
-English for object/field labels is **column D**, header `Field Label (EN)` (layout used on the 20 objects filled 2026-09-17). Japanese `Field Label` (col C) remains `CustomField.label`. Locate the EN column by **header name**; only treat physical column D as EN when that header is present.
+English for object/field labels is **column D**, header `Field Label (EN)` (layout used on the 20 objects filled 2026-09-17), on the live Data Dictionary sheet
+https://docs.google.com/spreadsheets/d/1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ
+Japanese `Field Label` (col C) remains `CustomField.label`. Locate the EN column by **header name**; only treat physical column D as EN when that header is present.
 
 ## Future field add (Japan team)
 

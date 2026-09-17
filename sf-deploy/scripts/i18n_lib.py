@@ -3,13 +3,14 @@
 i18n_lib.py — shared primitives for the translation pipeline.
 
 Mirrors the object-definition pipeline:
-  * Google Sheet is the source of truth (live reads only).
+  * Google Sheet is the source of truth (live reads only):
+    https://docs.google.com/spreadsheets/d/1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ
   * Org is the deploy TARGET, compared live via Metadata API (FLS-independent).
   * Delta is key-based + content-hash; unchanged translations are not redeployed.
   * Conflicts (sheet AND org both drifted from last successful deploy) are parked.
 
 This module has no CLI. Import from fetch_i18n / validate_i18n / i18n_drift /
-generate_* / prep_i18n.
+generate_object_translation.
 """
 from __future__ import annotations
 
@@ -52,29 +53,6 @@ KIND_OBJECT_FIELD = "ObjectField"
 KIND_OBJECT_HELP = "ObjectHelp"
 KIND_OBJECT_REL = "ObjectRelationshipLabel"
 KIND_OBJECT_PICKLIST = "ObjectPicklist"
-KIND_CUSTOM_LABEL = "CustomLabel"
-KIND_FLOW_DEF = "FlowDefinition"
-KIND_FLOW_SCREEN = "FlowScreen"
-KIND_FLOW_SCREEN_FIELD = "FlowScreenField"
-KIND_FLOW_CHOICE = "FlowChoice"
-KIND_FLOW_TEXT = "FlowTextTemplate"
-KIND_FLOW_ERROR = "FlowCustomError"
-KIND_FLOW_STAGE = "FlowStage"
-
-FLOW_COMPONENT_TO_KIND = {
-    "definition": KIND_FLOW_DEF,
-    "flow": KIND_FLOW_DEF,
-    "screen": KIND_FLOW_SCREEN,
-    "screeninfo": KIND_FLOW_SCREEN,
-    "screen field": KIND_FLOW_SCREEN_FIELD,
-    "screenfield": KIND_FLOW_SCREEN_FIELD,
-    "choice": KIND_FLOW_CHOICE,
-    "text template": KIND_FLOW_TEXT,
-    "texttemplate": KIND_FLOW_TEXT,
-    "custom error": KIND_FLOW_ERROR,
-    "customerror": KIND_FLOW_ERROR,
-    "stage": KIND_FLOW_STAGE,
-}
 
 # Codes used by i18n_drift / generators.
 NEW = "NEW_TRANSLATION"
@@ -83,7 +61,7 @@ UNCHANGED = "UNCHANGED"
 MISSING = "MISSING_TRANSLATION"
 ORG_ONLY = "ORG_ONLY"
 CONFLICT = "CONFLICT"
-SCHEMA_MISSING = "SCHEMA_MISSING"  # target field/value/flow/label absent in org
+SCHEMA_MISSING = "SCHEMA_MISSING"  # target field/value absent in org
 INVALID_LANG = "INVALID_LANG"
 
 WIP_TRUE = {"x", "true", "1", "yes", "○", "〇"}
@@ -408,10 +386,7 @@ def read_metadata(mtype: str, full_names: list[str], tok: str, inst: str,
             sys.exit(f"❌ readMetadata {mtype} HTTP {e.code}: {e.read().decode()[:400]}")
         root = ET.fromstring(strip_soap_ns(xml))
         for rec in root.findall(".//records"):
-            if rec.find("fullName") is not None or rec.find("fields") is not None \
-                    or rec.find("customLabels") is not None \
-                    or rec.find("flowDefinitions") is not None \
-                    or rec.find("labels") is not None:
+            if rec.find("fullName") is not None or rec.find("fields") is not None:
                 records.append(rec)
     return records
 
@@ -460,101 +435,4 @@ def parse_object_translation(rec: ET.Element, obj: str, lang: str) -> dict[str, 
                            language=lang, master=master, translation=trans,
                            source="org")
             out[e["id"]] = e
-    return out
-
-
-def parse_translations(rec: ET.Element, lang: str) -> dict[str, dict]:
-    """Translations SOAP/file record → {entry_id: org-entry}."""
-    out: dict[str, dict] = {}
-    for cl in rec.findall("customLabels"):
-        name = norm(cl.findtext("name") or cl.findtext("fullName"))
-        label = norm(cl.findtext("label") or cl.findtext("value"))
-        if not name:
-            continue
-        e = make_entry(kind=KIND_CUSTOM_LABEL, component=name, aspect="label",
-                       key=name, language=lang, master="", translation=label,
-                       source="org")
-        out[e["id"]] = e
-    for fd in rec.findall("flowDefinitions"):
-        flow = norm(fd.findtext("fullName"))
-        flabel = norm(fd.findtext("label"))
-        if flow and flabel:
-            e = make_entry(kind=KIND_FLOW_DEF, component=flow, aspect="label",
-                           key=flow, language=lang, master="", translation=flabel,
-                           source="org")
-            out[e["id"]] = e
-        for sc in fd.findall("screens"):
-            sname = norm(sc.findtext("name"))
-            slabel = norm(sc.findtext("label"))
-            if sname and slabel:
-                e = make_entry(kind=KIND_FLOW_SCREEN, component=flow, aspect="label",
-                               key=sname, language=lang, master="", translation=slabel,
-                               source="org")
-                out[e["id"]] = e
-            for fld in sc.findall("fields"):
-                fname = norm(fld.findtext("name"))
-                ftxt = norm(fld.findtext("fieldText"))
-                fhelp = norm(fld.findtext("helpText"))
-                if fname and ftxt:
-                    e = make_entry(kind=KIND_FLOW_SCREEN_FIELD, component=flow,
-                                   aspect="fieldText", key=f"{sname}.{fname}",
-                                   language=lang, master="", translation=ftxt,
-                                   source="org")
-                    out[e["id"]] = e
-                if fname and fhelp:
-                    e = make_entry(kind=KIND_FLOW_SCREEN_FIELD, component=flow,
-                                   aspect="help", key=f"{sname}.{fname}",
-                                   language=lang, master="", translation=fhelp,
-                                   source="org")
-                    out[e["id"]] = e
-        for ch in fd.findall("choices"):
-            cname = norm(ch.findtext("name"))
-            ctxt = norm(ch.findtext("choiceText"))
-            if cname and ctxt:
-                e = make_entry(kind=KIND_FLOW_CHOICE, component=flow,
-                               aspect="choiceText", key=cname, language=lang,
-                               master="", translation=ctxt, source="org")
-                out[e["id"]] = e
-        for tt in fd.findall("textTemplates"):
-            tname = norm(tt.findtext("name"))
-            ttxt = norm(tt.findtext("text"))
-            if tname and ttxt:
-                e = make_entry(kind=KIND_FLOW_TEXT, component=flow, aspect="text",
-                               key=tname, language=lang, master="", translation=ttxt,
-                               source="org")
-                out[e["id"]] = e
-        for ce in fd.findall("customErrorMessages"):
-            ename = norm(ce.findtext("name"))
-            emsg = norm(ce.findtext("errorMessage"))
-            if ename and emsg:
-                e = make_entry(kind=KIND_FLOW_ERROR, component=flow,
-                               aspect="errorMessage", key=ename, language=lang,
-                               master="", translation=emsg, source="org")
-                out[e["id"]] = e
-        for st in fd.findall("stages"):
-            sname = norm(st.findtext("name"))
-            slabel = norm(st.findtext("label"))
-            if sname and slabel:
-                e = make_entry(kind=KIND_FLOW_STAGE, component=flow, aspect="label",
-                               key=sname, language=lang, master="", translation=slabel,
-                               source="org")
-                out[e["id"]] = e
-    return out
-
-
-def parse_custom_labels_file(rec: ET.Element) -> dict[str, dict]:
-    """CustomLabels master file → {fullName: {value, language, ...}}."""
-    out = {}
-    for lab in rec.findall("labels"):
-        name = norm(lab.findtext("fullName"))
-        if not name:
-            continue
-        out[name] = {
-            "fullName": name,
-            "value": norm(lab.findtext("value")),
-            "language": norm(lab.findtext("language")) or MASTER_LANG,
-            "categories": norm(lab.findtext("categories")),
-            "shortDescription": norm(lab.findtext("shortDescription")),
-            "protected": (lab.findtext("protected") or "false").strip().lower(),
-        }
     return out

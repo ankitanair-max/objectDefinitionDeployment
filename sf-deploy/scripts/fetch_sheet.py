@@ -79,9 +79,6 @@ NON_OBJECT_TABS = {
     "表紙", "オブジェクト一覧", "変更履歴", "変更ログ", "フォーマット",
     "glossary", "data glossary", "ユーザー一覧", "データ型のマッピング",
     "ifログ", "変更ログ", "jetファイル作成指示書",
-    # Translation catalog tabs (same workbook; parsed by fetch_i18n.py, not as objects)
-    "i18n_lwc", "i18n_flows", "i18n_lwc labels", "i18n_flow",
-    "翻訳_lwc", "翻訳_flow", "lwc labels (en)", "flow translations (en)",
 }
 
 GRAY_GUARD_SUBSTR = "行挿入する場合は当行より上部"  # LEGACY end-of-field-list marker (col C)

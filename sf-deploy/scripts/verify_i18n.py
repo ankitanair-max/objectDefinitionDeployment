@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-verify_i18n.py — post-deploy live check that packaged translations landed.
+verify_i18n.py — post-deploy live check that packaged object translations landed.
 
 Reads the delta JSON (only rows with package=true) and re-reads the org via
-Metadata API. Exit 0 = every packaged translation matches the sheet text.
+Metadata API CustomObjectTranslation. Exit 0 = every packaged translation
+matches the sheet text.
 
 Usage:
   python scripts/verify_i18n.py --delta .build/i18n_drift.json --org ERPDEV01 --lang en_US
@@ -17,13 +18,12 @@ from pathlib import Path
 
 sys.path.insert(0, "scripts")
 from i18n_lib import (  # noqa: E402
-    KIND_CUSTOM_LABEL, content_hash, load_token, parse_object_translation,
-    parse_translations, read_metadata,
+    content_hash, load_token, parse_object_translation, read_metadata,
 )
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Verify packaged translations in the org")
+    ap = argparse.ArgumentParser(description="Verify packaged object translations in the org")
     ap.add_argument("--delta", default=".build/i18n_drift.json")
     ap.add_argument("--org", required=True)
     ap.add_argument("--lang", default="en_US")
@@ -49,12 +49,6 @@ def main() -> int:
             obj = fn.rsplit("-", 1)[0] if fn else ""
             if obj:
                 org.update(parse_object_translation(rec, obj, args.lang))
-    need_tr = any(e["kind"] == KIND_CUSTOM_LABEL or e["kind"].startswith("Flow")
-                  for e in expected)
-    if need_tr:
-        recs = read_metadata("Translations", [args.lang], tok, inst, ver)
-        for rec in recs:
-            org.update(parse_translations(rec, args.lang))
 
     missing = []
     mismatch = []
