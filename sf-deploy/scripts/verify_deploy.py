@@ -60,6 +60,25 @@ def expected_from_plan(plan_path: Path, only: set[str] | None) -> dict[str, list
     return out
 
 
+def expected_from_part_members(members: dict) -> dict[str, list[str]]:
+    """Expected objects + fields from ONE package part's exact members.
+
+    Object-scoped verification is wrong when one object is split across parts:
+    part 1 would try to confirm fields that only land in part 2. CustomField
+    members are ``Obj__c.Field__c``; a CustomObject member with no fields still
+    records the object so we confirm it exists.
+    """
+    out: dict[str, list[str]] = {}
+    for m in members.get("CustomObject") or []:
+        out.setdefault(str(m), [])
+    for m in members.get("CustomField") or []:
+        if "." not in str(m):
+            continue
+        obj, field = str(m).split(".", 1)
+        out.setdefault(obj, []).append(field)
+    return {k: sorted(set(v)) for k, v in sorted(out.items())}
+
+
 def expected_from_source(source_root: Path, only: set[str] | None) -> dict[str, list[str]]:
     """Map <Obj>__c -> [custom field api names] from generated metadata."""
     out: dict[str, list[str]] = {}
@@ -130,7 +149,8 @@ def packaged_translations(plan: dict) -> list[dict]:
 
 
 def verify_translations(plan: dict, org: str,
-                        objects: set[str] | None = None) -> list[str]:
+                        objects: set[str] | None = None,
+                        translation_members: set[str] | None = None) -> list[str]:
     """Read CustomObjectTranslation LIVE and confirm every packaged entry.
 
     Without this, a translation-only deploy passes verification on the strength
@@ -139,12 +159,17 @@ def verify_translations(plan: dict, org: str,
     failures; empty means every packaged translation is live in the org with
     the value we deployed.
 
-    ``objects`` restricts the check to the current package part. Per-part
-    verification must not look at translations that belong to later parts.
+    ``objects`` restricts the check to named objects. ``translation_members``
+    (``Obj__c-en_US`` values from the current package part) is stricter and
+    must be used for per-part verification so later parts are not required yet.
     """
     wanted = packaged_translations(plan)
     if objects is not None:
         wanted = [t for t in wanted if t.get("component") in objects]
+    if translation_members is not None:
+        lang = plan.get("lang") or DEFAULT_LANG
+        wanted = [t for t in wanted
+                  if f"{t.get('component')}-{lang}" in translation_members]
     if not wanted:
         return []
     lang = plan.get("lang") or DEFAULT_LANG
@@ -168,6 +193,25 @@ def verify_translations(plan: dict, org: str,
     return failures
 
 
+def verify_deletes(plan: dict, org: str) -> list[str]:
+    """Tooling CustomField members that IsDelete asked to remove but are still live.
+
+    An empty list means every planned deletion is actually absent. Never infer
+    this from the destructive deploy's exit code.
+    """
+    leftover: list[str] = []
+    by_obj: dict[str, list[str]] = {}
+    for m in plan.get("deleteMembers") or []:
+        if "." not in str(m):
+            continue
+        obj, field = str(m).split(".", 1)
+        by_obj.setdefault(obj, []).append(field)
+    for obj, fields in by_obj.items():
+        present = org_fields(obj, org)
+        leftover.extend(f"{obj}.{f}" for f in fields if f in present)
+    return leftover
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Live post-deploy verification")
     ap.add_argument("--target-org", required=True)
@@ -177,15 +221,27 @@ def main(argv: list[str] | None = None) -> int:
                          "(preferred over scanning the generated tree)")
     ap.add_argument("--objects", default="", help="comma-separated <Obj>__c to verify")
     ap.add_argument("--all", action="store_true", help="verify every generated object")
+    ap.add_argument("--part-members", default="",
+                    help="JSON of THIS package part's members; verification is "
+                         "limited to those CustomField / CustomObjectTranslation "
+                         "entries instead of every planned field on the object")
     args = ap.parse_args(argv)
 
     only = {o.strip() for o in args.objects.split(",") if o.strip()} or None
-    if not only and not args.all:
-        print("❌ pass --objects <Api,...> or --all")
+    part_members = json.loads(args.part_members) if args.part_members else None
+    if not only and not args.all and part_members is None:
+        print("❌ pass --objects <Api,...>, --all, or --part-members")
         return 2
 
     plan = json.loads(Path(args.plan).read_text(encoding="utf-8")) if args.plan else {}
-    if args.plan:
+    cot_members: set[str] | None = None
+    if part_members is not None:
+        expected = expected_from_part_members(part_members)
+        cot_members = set(part_members.get("CustomObjectTranslation") or [])
+        if not expected and not cot_members:
+            print("❌ --part-members has no CustomObject/CustomField/translation entries")
+            return 2
+    elif args.plan:
         expected = expected_from_plan(Path(args.plan), only)
         if not expected:
             print(f"❌ no objects in plan {args.plan}")
@@ -216,12 +272,18 @@ def main(argv: list[str] | None = None) -> int:
 
     # translations are a deployed component too — verify them live, not by
     # trusting that the package contained them.
-    if plan and plan.get("translationPackage"):
+    if plan and plan.get("translationPackage") and cot_members != set():
         try:
-            failures = verify_translations(plan, args.target_org, objects=only)
+            if cot_members is not None:
+                failures = verify_translations(
+                    plan, args.target_org, translation_members=cot_members)
+            else:
+                failures = verify_translations(
+                    plan, args.target_org, objects=only)
         except (OrgAuthError, TranslationUnavailable, MetadataApiError) as e:
             failures = [f"could not read translations: {e}"]
-        count = len(plan["translationPackage"])
+        count = (len(cot_members) if cot_members is not None
+                 else len(plan["translationPackage"]))
         print(f"\n  [{'OK' if not failures else 'FAIL'}] translations ({plan.get('lang')})")
         print(f"      packaged: {count}  |  confirmed: {count - len(failures)}  "
               f"|  failed: {len(failures)}")

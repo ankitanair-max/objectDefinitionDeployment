@@ -146,6 +146,7 @@ def test_every_package_part_is_deployed_in_order():
 
         assert [pkg_of(c) for c in deployed] == [p["file"] for p in parts]
         assert len(verified) == len(parts), "each part is verified before the next"
+        assert all("--part-members" in c for c in verified)
 
 
 def test_check_only_also_covers_every_part():
@@ -406,7 +407,8 @@ def test_a_translation_only_deploy_is_not_verified_by_fields_alone():
         with patched(verify_deploy, "org_has_object", lambda obj, org: True), \
                 patched(verify_deploy, "org_fields", lambda obj, org: set()), \
                 patched(verify_deploy, "verify_translations",
-                        lambda p, org, objects=None: ["TI_Fnt_Qty__c: not present"]):
+                        lambda p, org, objects=None, translation_members=None:
+                            ["TI_Fnt_Qty__c: not present"]):
             rc = verify_deploy.main(["--target-org", "A", "--plan", str(plan_path),
                                      "--objects", OBJ])
     assert rc == 1, "an unverified translation must fail the whole verification"
@@ -513,7 +515,8 @@ def test_isdelete_runs_the_destructive_deploy_with_the_flag():
             sent.append(cmd)
             return 0
 
-        with destructive_paths(tmp), fake_runner(handler):
+        with destructive_paths(tmp), fake_runner(handler), \
+                patched(verify_deploy, "verify_deletes", lambda plan, org: []):
             prep_deploy.destructive_phase(args_ns(deletes=True), delete_plan(),
                                           start=True)
         xml = (tmp / "destructiveChanges.xml").read_text(encoding="utf-8")
@@ -532,7 +535,8 @@ def test_delete_only_deploy_phase_still_runs_destructive():
 
     plan = delete_plan()
     with patched(prep_deploy, "destructive_phase", fake_dest), \
-            patched(prep_deploy, "deploy_packages", no_additive):
+            patched(prep_deploy, "deploy_packages", no_additive), \
+            patched(prep_deploy, "refresh_object_reports", lambda *a, **k: None):
         rc = prep_deploy.deploy_phase(args_ns(deletes=True), Path("x"), plan, {})
     assert rc == 0
     assert called == [True]
@@ -609,6 +613,48 @@ def test_translation_scope_skips_workbench_without_en():
     assert objs == [OBJ]
 
 
+def test_delete_only_fails_if_fields_remain():
+    def still_there(plan, org):
+        return [f"{OBJ}.TI_Fnt_Old__c"]
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+
+        def handler(cmd):
+            return 0
+
+        with destructive_paths(tmp), fake_runner(handler), \
+                patched(verify_deploy, "verify_deletes", still_there):
+            try:
+                prep_deploy.destructive_phase(
+                    args_ns(deletes=True), delete_plan(), start=True)
+                raise AssertionError("must not report success while the field remains")
+            except SystemExit as e:
+                assert "still in the org" in str(e)
+
+
+def test_one_object_split_across_parts_verifies_only_this_part():
+    """Part 1 must not require part 2's fields of the same object to exist yet."""
+    part1 = {"CustomField": [f"{OBJ}.TI_Fnt_A__c"]}
+    assert verify_deploy.expected_from_part_members(part1) == {OBJ: ["TI_Fnt_A__c"]}
+    plan = {"objects": [{"object": OBJ}],
+            "newFields": {OBJ: ["TI_Fnt_A__c", "TI_Fnt_B__c", "TI_Fnt_C__c"]},
+            "lang": "en_US", "translations": [], "translationPackage": []}
+    with tempfile.TemporaryDirectory() as td:
+        plan_path = Path(td) / "plan.json"
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        with patched(verify_deploy, "org_has_object", lambda obj, org: True), \
+                patched(verify_deploy, "org_fields",
+                        lambda obj, org: {"TI_Fnt_A__c"}):
+            rc_part = verify_deploy.main(
+                ["--target-org", "A", "--plan", str(plan_path),
+                 "--part-members", json.dumps(part1)])
+            rc_object = verify_deploy.main(
+                ["--target-org", "A", "--plan", str(plan_path), "--objects", OBJ])
+    assert rc_part == 0
+    assert rc_object == 1, "object-scoped verify would demand part 2's fields"
+
+
 def main() -> int:
     print("test_deploy_command")
     for fn in (
@@ -639,6 +685,8 @@ def main() -> int:
         test_multi_object_name_drift_uses_matching_object_meta,
         test_per_part_translation_verification_ignores_later_parts,
         test_translation_scope_skips_workbench_without_en,
+        test_delete_only_fails_if_fields_remain,
+        test_one_object_split_across_parts_verifies_only_this_part,
     ):
         fn()
         print(f"  ok  {fn.__name__[5:].replace('_', '-')}")

@@ -46,7 +46,8 @@ def check_only(org: str, out: Path) -> dict:
     """Run the canonical command in its build (check-only) phase."""
     cp = subprocess.run(
         [sys.executable, str(SCRIPTS / "prep_deploy.py"), "--org", org,
-         "--tabs", TABS, "--phase", "build", "--out", str(out / "rows.json")],
+         "--tabs", TABS, "--phase", "build", "--out", str(out / "rows.json"),
+         "--on-translation-unavailable", "skip"],
         cwd=SF_DEPLOY, text=True, capture_output=True, timeout=1800)
     assert cp.returncode == 0, cp.stdout[-4000:] + cp.stderr[-2000:]
     plan = json.loads(PLAN.read_text(encoding="utf-8"))

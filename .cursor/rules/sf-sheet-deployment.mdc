@@ -56,9 +56,9 @@ explicit scope (see step 3).
 4. **Generate (STAGED, delta-scoped)** —
    `python scripts/generate_xml.py --in temp_updates.json --plan .build/deploy_plan.json`
    → writes `.build/staging/force-app/main/default/objects/**`; the tracked
-   `force-app` tree is never touched by a build. A bare `generate_xml.py` with
-   no `--plan` is REFUSED (exit 2) because it would write every sheet field
-   rather than the delta; `--all-fields` forces that, for inspection only.
+   `force-app` tree is never touched by a deploy build. A bare `generate_xml.py`
+   (no `--plan`) writes every sheet field into in-tree `force-app` — that is the
+   org-free `run.py` path, not a deployable delta.
    Japanese `Field Label` only — never write `Field Label (EN)` into `CustomField.label`.
 5. **Translations (when the tab has `Field Label (EN)`)** — the plan already
    carries the translation delta, and
@@ -79,8 +79,9 @@ explicit scope (see step 3).
    `reports/Object_Deployment_Report.xlsx` via `scripts/build_object_report.py`
    (see "Post-deploy report" below).
 
-`run.py` is a thin alias for `prep_deploy.py --phase build`; it no longer runs a
-pipeline of its own.
+`run.py` is the org-free sheet→package path (`fetch_sheet` → `validate_sheet`
+→ `generate_xml` → `build_manifest`). It does not require Salesforce access
+and is not an alias for `prep_deploy.py`. Org deploys use `prep_deploy.py`.
 
 ## Incremental deploys
 

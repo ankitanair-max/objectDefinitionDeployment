@@ -158,18 +158,59 @@ def _org_object_el(snapshot: dict | None, obj_api: str) -> ET.Element | None:
     return ET.fromstring(xml) if xml else None
 
 
+# CustomObject children that SFDX source format stores as sibling files.
+# Copying them into ``.object-meta.xml`` makes `sf project convert/deploy`
+# nest them back into the Metadata API CustomObject payload — a hidden
+# full-object field deploy. Parent-level properties (label, sharingModel,
+# nameField, enablement flags, actionOverrides, searchLayouts) stay here.
+DECOMPOSED_OBJECT_CHILDREN = frozenset({
+    "fields",
+    "recordTypes",
+    "validationRules",
+    "listViews",
+    "webLinks",
+    "compactLayouts",
+    "fieldSets",
+    "businessProcesses",
+    "sharingReasons",
+    "indexes",
+})
+
+
+def mdapi_nested_fields(object_xml: str | ET.Element) -> list[str]:
+    """Field API names nested under a CustomObject document.
+
+    ``readMetadata(CustomObject)`` returns these; converting a source
+    ``.object-meta.xml`` that still contains them would redeploy every sibling
+    field. A parent-only source file returns an empty list.
+    """
+    root = ET.fromstring(object_xml) if isinstance(object_xml, str) else object_xml
+    names: list[str] = []
+    for child in root:
+        if _localname(child.tag) != "fields":
+            continue
+        full = ""
+        for gc in child:
+            if _localname(gc.tag) == "fullName":
+                full = (gc.text or "").strip()
+                break
+        if full:
+            names.append(full)
+    return names
+
+
 def write_patched_object_meta(
     obj_api: str,
     org_rec: ET.Element,
     *,
     enable_history: bool = False,
     force_controlled_by_parent: bool = False,
+    name_field: dict | None = None,
 ) -> None:
-    """Copy the org CustomObject and change only the properties this deploy needs.
+    """Copy PARENT-LEVEL org CustomObject metadata and apply only this deploy's patches.
 
-    Never rebuild sharingModel / nameField / enablement from a field-delta row
-    set. Existing Master-Detail fields are filtered out of that set, so
-    reconstructing would emit ``ReadWrite`` on a ``ControlledByParent`` object.
+    Never rebuild sharingModel from a field-delta row set, and never copy
+    decomposed children (``<fields>``, record types, …) into the source file.
     """
     obj_dir = objects_root() / obj_api
     obj_dir.mkdir(parents=True, exist_ok=True)
@@ -177,7 +218,8 @@ def write_patched_object_meta(
 
     root = ET.Element(qname("CustomObject"))
     for child in list(org_rec):
-        if _localname(child.tag) == "fullName":
+        tag = _localname(child.tag)
+        if tag == "fullName" or tag in DECOMPOSED_OBJECT_CHILDREN:
             continue
         root.append(_copy_ns(child))
     set_text(root, "fullName", obj_api)
@@ -189,6 +231,19 @@ def write_patched_object_meta(
 
     if enable_history:
         set_text(root, "enableHistory", "true")
+
+    if name_field is not None:
+        for child in list(root):
+            if _localname(child.tag) == "nameField":
+                root.remove(child)
+        _append_name_field(
+            root,
+            obj_api=obj_api,
+            obj_label=str(name_field.get("label") or obj_api),
+            name_field_label=str(name_field.get("label") or ""),
+            name_field_type=str(name_field.get("type") or ""),
+            name_field_display_format=str(name_field.get("displayFormat") or ""),
+        )
 
     if hasattr(ET, "indent"):
         ET.indent(root, space="    ")
@@ -202,6 +257,8 @@ def write_patched_object_meta(
         extras.append("sharingModel=ControlledByParent")
     if enable_history:
         extras.append("enableHistory=true")
+    if name_field is not None:
+        extras.append(f"nameField={name_field.get('type') or '?'}")
     note = f" ({', '.join(extras)})" if extras else ""
     print(f"Patched existing object metadata: {obj_api}{note}")
 
@@ -834,10 +891,18 @@ def process_fields(rows: list[dict], *, plan: dict | None = None,
                         f"⛔ {obj_api} is packaged as CustomObject but the org "
                         f"snapshot has no parent metadata to patch. Refusing to "
                         f"reconstruct it from a field-delta row set.")
+                name_spec = None
+                if f"{obj_api}.Name" in set((plan or {}).get("driftApproved") or []):
+                    name_spec = {
+                        "label": row.get("Name Field Label", ""),
+                        "type": row.get("Name Field Type", ""),
+                        "displayFormat": row.get("Name Field Display Format", ""),
+                    }
                 write_patched_object_meta(
                     obj_api, rec,
                     enable_history=obj_api in history_objects,
                     force_controlled_by_parent=obj_api in md_objects,
+                    name_field=name_spec,
                 )
             else:
                 (objects_dir / obj_api).mkdir(parents=True, exist_ok=True)

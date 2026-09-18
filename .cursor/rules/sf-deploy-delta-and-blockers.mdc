@@ -191,20 +191,14 @@ and deploy ONLY the new (and, if explicitly requested, changed) fields.
    field whose sheet TYPE/FORMULA/referenceTo/PICKLIST changed but whose API name
    is unchanged is invisible to the name delta and gets silently skipped (this is
    exactly how ~27 Deal fields — Lookup→Formula, Checkbox→Picklist, picklist-value
-   edits — sat undeployed). For EVERY existing object you MUST compare definitions:
+   edits — sat undeployed).    For EVERY existing object you MUST compare definitions. In the canonical
+   pipeline this is a **library call** inside `plan_deploy.py`
+   (`attr_drift.parse_org_object` + `attr_drift.compute_drift`) against the
+   CustomObject metadata already in the org snapshot — there is no per-object
+   `attr_drift.py` subprocess. The CLI remains for ad-hoc checks:
    ```
    python scripts/attr_drift.py --object <Obj>__c --rows temp_updates.json --org <ORG>
    ```
- It reads the org's ACTUAL metadata via the Metadata API `readMetadata`
- (FLS-independent) and compares, per field, **type, formula, referenceTo,
- picklist values, length, visibleLines, precision, scale, required, unique, and
- externalId** (and flags any unmapped Data Type). It writes
- `.build/attr_drift_<Obj>.json`. In the pipeline the same comparison runs as a
- LIBRARY inside `plan_deploy.py` (`attr_drift.parse_org_object` +
- `attr_drift.compute_drift`) against the object metadata already in the bulk
- snapshot, so the drift lands in the plan without a single extra org call, and
- each entry carries the `component` it must be deployed as. The CLI above stays
- available for ad-hoc checks.
  SURFACE any drift to the user. Redeploying drift is a user decision, not
  automatic — many type changes (Lookup↔Formula, Checkbox↔Picklist, Text→Lookup)
  require delete+recreate and DESTROY the field's data, so never silently

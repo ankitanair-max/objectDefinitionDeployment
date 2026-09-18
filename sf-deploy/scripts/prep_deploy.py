@@ -87,6 +87,7 @@ from translation_lib import (  # noqa: E402
     translated_tabs,
 )
 import build_destructive  # noqa: E402
+import verify_deploy  # noqa: E402
 
 DEFAULT_SHEET_ID = "1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ"
 # Live Data Dictionary: https://docs.google.com/spreadsheets/d/1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ
@@ -291,12 +292,15 @@ def deploy_packages(args, parts: list[dict], *, start: bool) -> None:
 
 
 def verify_part(args, part: dict, i: int, total: int) -> None:
-    """Confirm one part landed before the next is sent."""
-    objs = sorted({m.split(".")[0].split("-")[0]
-                   for vals in part["members"].values() for m in vals})
+    """Confirm one part landed before the next is sent.
+
+    Scope is the part's exact members, not every planned field on those objects
+    — one object can be split across packages, and part 1 must not require
+    part 2's fields (or translations) to already be in the org.
+    """
     cp = subprocess.run(
         ["python3", str(SCRIPTS / "verify_deploy.py"), "--target-org", args.org,
-         "--plan", str(PLAN), "--objects", ",".join(objs)],
+         "--plan", str(PLAN), "--part-members", json.dumps(part["members"])],
         env=sf_env(args), text=True)
     if cp.returncode != 0:
         raise SystemExit(
@@ -340,6 +344,14 @@ def destructive_phase(args, plan: dict, *, start: bool) -> None:
     if subprocess.run(cmd, env=sf_env(args), text=True).returncode != 0:
         raise SystemExit("⛔ the destructive deploy failed — the additive deploy "
                          "already landed; investigate before retrying.")
+    if not start:
+        return
+    leftover = verify_deploy.verify_deletes(plan, args.org)
+    if leftover:
+        raise SystemExit(
+            "⛔ IsDelete verification failed — these fields are still in the org "
+            f"(Tooling CustomField): {', '.join(leftover)}")
+    print(f"      confirmed absent: {len(members)} field(s)")
 
 
 def build_phase(args, temp_path: Path) -> tuple[dict, dict[str, str]]:
@@ -535,30 +547,46 @@ def deploy_phase(args, temp_path: Path, plan: dict, tab_of: dict[str, str]) -> i
     print("\n[2/5] IsDelete set (destructive flow)")
     destructive_phase(args, plan, start=True)
 
+    report_objs = objs
     if additive_empty:
-        print("\n" + "=" * 72)
-        print(f"  ✅ DELETE-ONLY DEPLOY: {len(plan.get('deleteMembers') or [])} "
-              f"field(s) processed in {args.org}")
-        print("=" * 72)
-        return 0
+        report_objs = sorted({m.split(".", 1)[0]
+                              for m in (plan.get("deleteMembers") or []) if "." in m})
+        if not (args.deletes and plan.get("deleteMembers")):
+            print("\n" + "=" * 72)
+            print("  IsDelete package built, not executed (pass --deletes to delete).")
+            print("=" * 72)
+            return 0
+    else:
+        # MANDATORY live verification: objects, fields AND every packaged
+        # translation (Tooling API for fields, readMetadata for translations)
+        print("\n[3/5] live verification (objects, fields and translations)")
+        cp = subprocess.run(
+            ["python3", str(SCRIPTS / "verify_deploy.py"), "--target-org", args.org,
+             "--objects", ",".join(objs), "--plan", str(PLAN)],
+            env=sf_env(args), text=True)
+        if cp.returncode != 0:
+            raise SystemExit("⛔ VERIFICATION FAILED — the deploy did NOT fully land. "
+                             "Do not report success; investigate before retrying.")
 
-    # MANDATORY live verification: objects, fields AND every packaged
-    # translation (Tooling API for fields, readMetadata for translations)
-    print("\n[3/5] live verification (objects, fields and translations)")
-    cp = subprocess.run(
-        ["python3", str(SCRIPTS / "verify_deploy.py"), "--target-org", args.org,
-         "--objects", ",".join(objs), "--plan", str(PLAN)],
-        env=sf_env(args), text=True)
-    if cp.returncode != 0:
-        raise SystemExit("⛔ VERIFICATION FAILED — the deploy did NOT fully land. "
-                         "Do not report success; investigate before retrying.")
-
-    # translation hashes are recorded only now that the deploy is verified
-    print("\n[4/5] persist verified translation state")
-    persist_sync_state(plan)
+        print("\n[4/5] persist verified translation state")
+        persist_sync_state(plan)
 
     # report refresh per object (mandatory) — non-fatal if it errors
     print("\n[5/5] refresh deployment report tabs")
+    refresh_object_reports(args, report_objs, tab_of)
+
+    print("\n" + "=" * 72)
+    if additive_empty:
+        print(f"  ✅ DELETE-ONLY DEPLOYED & VERIFIED: "
+              f"{len(plan.get('deleteMembers') or [])} field(s) gone from {args.org}")
+    else:
+        print(f"  ✅ BATCH DEPLOYED & VERIFIED: {len(objs)} object(s), "
+              f"{len(parts)} package(s) confirmed in {args.org}")
+    print("=" * 72)
+    return 0
+
+
+def refresh_object_reports(args, objs: list[str], tab_of: dict[str, str]) -> None:
     for o in objs:
         tab = tab_of.get(o, "")
         fields_dir = STAGING_ROOT / "objects" / o / "fields"
@@ -574,12 +602,6 @@ def deploy_phase(args, temp_path: Path, plan: dict, tab_of: dict[str, str]) -> i
         rc = subprocess.run(cmd, env=google_env(args), text=True).returncode
         if rc != 0:
             print(f"      ⚠️  report refresh failed for {o} (deploy still verified).")
-
-    print("\n" + "=" * 72)
-    print(f"  ✅ BATCH DEPLOYED & VERIFIED: {len(objs)} object(s), "
-          f"{len(parts)} package(s) confirmed in {args.org}")
-    print("=" * 72)
-    return 0
 
 
 def main() -> int:

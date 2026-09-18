@@ -646,6 +646,9 @@ def test_existing_object_meta_is_patched_not_rebuilt():
         f"<sharingModel>ControlledByParent</sharingModel>"
         f"<enableHistory>false</enableHistory>"
         f"<nameField><type>Text</type><label>No</label></nameField>"
+        f"<fields><fullName>TI_Fnt_Parent__c</fullName><type>MasterDetail</type></fields>"
+        f"<recordTypes><fullName>Domestic</fullName><label>Domestic</label></recordTypes>"
+        f"<validationRules><fullName>VR1</fullName><active>true</active></validationRules>"
         f"</records>")
     rows = [meta_row(),
             field_row("TI_Fnt_Hist__c", "履歴", "History",
@@ -664,9 +667,75 @@ def test_existing_object_meta_is_patched_not_rebuilt():
         assert "<sharingModel>ControlledByParent</sharingModel>" in meta, meta
         assert "<sharingModel>ReadWrite</sharingModel>" not in meta
         assert "<enableHistory>true</enableHistory>" in meta
+        assert generate_xml.mdapi_nested_fields(meta) == [], meta
+        assert "<fullName>TI_Fnt_Parent__c</fullName>" not in meta
+        assert "Domestic" not in meta and "VR1" not in meta
         fields = sorted(p.name for p in (src / "objects" / OBJ / "fields").iterdir())
         assert fields == ["TI_Fnt_Hist__c.field-meta.xml"]
     print("  ok  existing-object-meta-is-patched-not-rebuilt")
+
+
+def test_patched_object_payload_excludes_org_fields():
+    """The converted CustomObject payload must not carry existing sibling fields."""
+    import generate_xml
+
+    org_xml = (
+        f"<records><fullName>{OBJ}</fullName>"
+        f"<sharingModel>ReadWrite</sharingModel>"
+        f"<nameField><type>Text</type><label>No</label></nameField>"
+        f"<fields><fullName>TI_Fnt_Old__c</fullName><type>Text</type>"
+        f"<label>Old</label></fields>"
+        f"<fields><fullName>TI_Fnt_Also__c</fullName><type>Number</type>"
+        f"</fields></records>")
+    assert generate_xml.mdapi_nested_fields(org_xml) == [
+        "TI_Fnt_Old__c", "TI_Fnt_Also__c"]
+    rows = [meta_row(), field_row("TI_Fnt_Hist__c", "履歴", **{"Track History": "TRUE"})]
+    snap = snapshot(fields=["TI_Fnt_Old__c", "TI_Fnt_Also__c"], object_meta={OBJ: org_xml})
+    plan = plan_for(rows, snap, lang="off")
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "force-app/main/default"
+        generate_xml.set_source_root(src)
+        generate_xml.process_fields(
+            generate_xml.plan_filter(rows, plan), plan=plan, snapshot=snap)
+        meta_path = src / "objects" / OBJ / f"{OBJ}.object-meta.xml"
+        payload = meta_path.read_text()
+        assert generate_xml.mdapi_nested_fields(payload) == []
+        assert "TI_Fnt_Old__c" not in payload
+        assert "TI_Fnt_Also__c" not in payload
+    print("  ok  patched-object-payload-excludes-org-fields")
+
+
+def test_approved_name_drift_is_written_into_object_meta():
+    """Approved Text→AutoNumber Name drift must land in generated XML, not just the plan."""
+    import generate_xml
+
+    org_xml = (
+        f"<records><fullName>{OBJ}</fullName>"
+        f"<sharingModel>ReadWrite</sharingModel>"
+        f"<nameField><type>Text</type><label>No</label></nameField>"
+        f"<fields><fullName>TI_Fnt_Qty__c</fullName><type>Text</type></fields>"
+        f"</records>")
+    meta = meta_row()
+    meta["Name Field Type"] = "Autonumber"
+    meta["Name Field Display Format"] = "RCV-{0000000}"
+    meta["Name Field Label"] = "受入番号"
+    rows = [meta]
+    snap = snapshot(fields=["TI_Fnt_Qty__c"], object_meta={OBJ: org_xml})
+    drift = {OBJ: [{"field": "Name", "component": "CustomObject",
+                    "reason": "STANDARD Name field; type: sheet=AutoNumber org=Text"}]}
+    plan = plan_for(rows, snap, drift=drift, include_drift={f"{OBJ}.Name"}, lang="off")
+    assert plan["manifestMembers"].get("CustomObject") == [OBJ]
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "force-app/main/default"
+        generate_xml.set_source_root(src)
+        generate_xml.process_fields(
+            generate_xml.plan_filter(rows, plan), plan=plan, snapshot=snap)
+        meta = (src / "objects" / OBJ / f"{OBJ}.object-meta.xml").read_text()
+        assert "<type>AutoNumber</type>" in meta, meta
+        assert "<displayFormat>RCV-{0000000}</displayFormat>" in meta
+        assert "<type>Text</type>" not in meta
+        assert generate_xml.mdapi_nested_fields(meta) == []
+    print("  ok  approved-name-drift-is-written-into-object-meta")
 
 
 def test_approved_drift_generates_only_the_changed_field():
@@ -779,6 +848,8 @@ def main() -> int:
         test_partial_metadata_response_is_an_error,
         test_namespace_aware_parsing_keeps_text_intact,
         test_existing_object_meta_is_patched_not_rebuilt,
+        test_patched_object_payload_excludes_org_fields,
+        test_approved_name_drift_is_written_into_object_meta,
         test_approved_drift_generates_only_the_changed_field,
         test_parked_translation_conflict_is_a_validation_error,
     ):
