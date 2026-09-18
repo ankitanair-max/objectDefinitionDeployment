@@ -32,7 +32,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from translation_lib import (  # noqa: E402
     CHANGED, EN_FLAG, KIND_NAME_FIELD, KIND_OBJECT_FIELD, KIND_OBJECT_LABEL,
-    MISSING, NEW, PARSE_ERROR, UNCHANGED, apply_new_only, classify,
+    MISSING, NEW, PARSE_ERROR, SCHEMA_MISSING, UNCHANGED, apply_new_only, classify,
     content_hash, entries_from_object_rows, has_translation_columns,
     load_sync_state, make_entry, parse_object_translation, save_sync_state,
 )
@@ -123,6 +123,19 @@ def test_japan_adds_one_field():
     print("  ok  japan-adds-one-field")
 
 
+def test_changed_en_is_packaged_by_default():
+    """An English label edit is a translation delta, not a destructive field change."""
+    obj = "TI_Fnt_Deal__c"
+    org_e = _field(obj, "TI_Fnt_Status__c", "Old Label", source="org")
+    org = {org_e["id"]: org_e}
+    sheet = [_field(obj, "TI_Fnt_Status__c", "New Label")]
+    classified = classify(sheet, org)
+    rec = classified[0]
+    assert rec["code"] == CHANGED
+    assert rec["package"] is True
+    print("  ok  changed-en-is-packaged-by-default")
+
+
 def test_changed_en_not_packaged_new_only():
     obj = "TI_Fnt_Deal__c"
     org_e = _field(obj, "TI_Fnt_Status__c", "Status", source="org")
@@ -133,6 +146,39 @@ def test_changed_en_not_packaged_new_only():
     assert rec["code"] == CHANGED
     assert rec["package"] is False
     print("  ok  changed-en-not-packaged")
+
+
+def test_matching_en_is_a_noop():
+    existing = _field(OBJ, "TI_Fnt_ProductName__c", "Product name", source="org")
+    classified = classify([_field(OBJ, "TI_Fnt_ProductName__c", "Product name")],
+                          {existing["id"]: existing})
+    rec = classified[0]
+    assert rec["code"] == UNCHANGED and rec["package"] is False
+    print("  ok  matching-en-is-a-noop")
+
+
+def test_wip_and_isdelete_rows_are_not_catalogued():
+    rows = [
+        _row("出荷", OBJ, "TI_Fnt_Qty__c", "数量", en="Quantity"),
+        _row("出荷", OBJ, "TI_Fnt_Draft__c", "下書き", en="Draft", WIP="TRUE"),
+        _row("出荷", OBJ, "TI_Fnt_Old__c", "旧", en="Old", IsDelete="TRUE"),
+    ]
+    keys = {e["key"] for e in entries_from_object_rows(rows)}
+    assert "TI_Fnt_Qty__c" in keys
+    assert "TI_Fnt_Draft__c" not in keys
+    assert "TI_Fnt_Old__c" not in keys
+    print("  ok  wip-and-isdelete-rows-are-not-catalogued")
+
+
+def test_schema_missing_is_not_packaged():
+    e = _field(OBJ, "TI_Fnt_Ghost__c", "Ghost")
+    classified = classify(
+        [e], {}, org_schema={OBJ: {"TI_Fnt_ProductName__c"}},
+        planned_fields={OBJ: set()})
+    rec = classified[0]
+    assert rec["code"] == SCHEMA_MISSING
+    assert rec["package"] is False
+    print("  ok  schema-missing-is-not-packaged")
 
 
 def test_hash_utf8():
@@ -423,6 +469,71 @@ def test_untranslated_rows_skip_the_org_entirely():
     print("  ok  untranslated-rows-skip-the-org-entirely")
 
 
+def test_existing_field_en_generates_artifact():
+    """Existing object/field + EN in the sheet ⇒ a fieldTranslation file is written."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        entries = [_field(OBJ, "TI_Fnt_ProductName__c", "Product name")]
+        parent, fields = patch_translation(None, entries)
+        root = tmp / "objectTranslations"
+        write_translation_dir(root, OBJ, "en_US", parent, fields)
+        f = root / f"{OBJ}-en_US" / "TI_Fnt_ProductName__c.fieldTranslation-meta.xml"
+        assert f.exists()
+        assert "<label>Product name</label>" in f.read_text(encoding="utf-8")
+    print("  ok  existing-field-en-generates-artifact")
+
+
+def test_duplicate_and_invalid_fail_validation():
+    """Sheet defects are ERRORs on the existing validate_sheet Report."""
+    import validate_sheet
+
+    dup_rows = [
+        {"_type": "object_meta", "_SheetName": "出荷", "Object API Name": OBJ,
+         "Object Label": "出荷", EN_FLAG: True, "Object Label (EN)": "Shipout"},
+        _row("出荷", OBJ, "TI_Fnt_Status__c", "状態", en="Status"),
+        _row("出荷", OBJ, "TI_Fnt_Status__c", "状態", en="Status"),
+    ]
+    rep = validate_sheet.Report()
+    validate_sheet.validate_translations(dup_rows, rep)
+    dups = [i for i in rep.items if i["check"] == "translation.duplicate"]
+    assert dups, rep.items
+    assert "Duplicate English translation entries" in dups[0]["message"]
+    assert "Object: " + OBJ in dups[0]["message"]
+    assert "Field: TI_Fnt_Status__c" in dups[0]["message"]
+
+    bad_rows = [
+        {"_type": "object_meta", "_SheetName": "出荷", "Object API Name": OBJ,
+         EN_FLAG: True, "Object Label (EN)": "Shipout"},
+        _row("出荷", OBJ, "", "幽霊", en="Ghost"),
+        _row("出荷", "", "TI_Fnt_Qty__c", "数量", en="Quantity"),
+    ]
+    # give the blank-object row the EN flag so it is treated as translated
+    bad_rows[-1][EN_FLAG] = True
+    bad_rows[-1]["Object API Name"] = ""
+    rep2 = validate_sheet.Report()
+    validate_sheet.validate_translations(bad_rows, rep2)
+    checks = {i["check"] for i in rep2.items}
+    assert "translation.field" in checks, rep2.items
+    assert "translation.object" in checks, rep2.items
+    assert any("invalid/missing field identifier" in i["message"] for i in rep2.items)
+    assert any("invalid/missing object identifier" in i["message"] for i in rep2.items)
+    print("  ok  duplicate-and-invalid-fail-validation")
+
+
+def test_no_separate_translation_command():
+    """Translations ride the canonical command; there is no translation-deploy CLI."""
+    names = {p.name for p in SCRIPTS.glob("*.py")}
+    banned = {"deploy_translations.py", "translation_deploy.py",
+              "deploy-translations.py", "translation-deploy.py"}
+    assert not (names & banned), names & banned
+    prep = (SCRIPTS / "prep_deploy.py").read_text(encoding="utf-8")
+    assert "generate_object_translation.py" in prep
+    assert "CANONICAL DEPLOY ENTRY POINT" in prep
+    for token in ("deploy-translations", "translation-deploy", "deploy_translations"):
+        assert token not in prep
+    print("  ok  no-separate-translation-command")
+
+
 def test_translation_unavailable_is_actionable():
     from translation_lib import MetadataApiError, TranslationUnavailable, read_object_translations
     import translation_lib as tl
@@ -450,7 +561,11 @@ def main() -> int:
     print("test_translation_delta")
     for fn in (
         test_japan_adds_one_field,
+        test_changed_en_is_packaged_by_default,
         test_changed_en_not_packaged_new_only,
+        test_matching_en_is_a_noop,
+        test_wip_and_isdelete_rows_are_not_catalogued,
+        test_schema_missing_is_not_packaged,
         test_hash_utf8,
         test_patch_preserves_all_org_translations,
         test_name_field_label_round_trip,
@@ -465,6 +580,9 @@ def main() -> int:
         test_no_keychain_or_home_assumptions,
         test_clean_home_generation_without_org,
         test_untranslated_rows_skip_the_org_entirely,
+        test_existing_field_en_generates_artifact,
+        test_duplicate_and_invalid_fail_validation,
+        test_no_separate_translation_command,
         test_translation_unavailable_is_actionable,
     ):
         fn()

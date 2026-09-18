@@ -319,6 +319,12 @@ def entries_from_object_rows(rows: list[dict], lang: str = DEFAULT_LANG) -> list
                            translation=name_en, source=source)
             out.append(e)
             continue
+        # Honor the same skip flags as field deploy (defensive: fetch_sheet
+        # already dropped these, but a raw-rows caller must not translate them).
+        if truthy(r.get("WIP")):
+            continue
+        if is_delete(r.get("IsDelete")):
+            continue
         api = norm(r.get("Field API Name"))
         if not api.endswith("__c"):
             continue
@@ -477,16 +483,25 @@ def classify(sheet_entries: list[dict], org_by_id: dict[str, dict],
 
 
 def apply_new_only(classified: list[dict]) -> list[dict]:
-    """Keep packaging limited to NEW_TRANSLATION (Japan added a field).
+    """Opt-in: keep packaging limited to NEW_TRANSLATION.
 
-    CHANGED_EN is still reported but not packaged — same rule as field
-    attr_drift: an existing definition is not silently redeployed.
+    The default deploy packages CHANGED translations too — an English label
+    update is not destructive (unlike a field-type change). Pass ``--new-only``
+    to report CHANGED without packaging it.
     """
     for rec in classified:
         if rec.get("code") == CHANGED and rec.get("package"):
             rec["package"] = False
             rec["reason"] = (rec.get("reason") or "") + " [new-only: not packaged]"
     return classified
+
+
+def format_translation_error(*, obj: str, field: str, reason: str) -> str:
+    """Actionable validation message naming the affected object and field."""
+    return (f"Translation configuration error:\n"
+            f"Object: {obj or '(missing)'}\n"
+            f"Field: {field or '(missing)'}\n"
+            f"Reason: {reason}")
 
 
 DEFAULT_SYNC_STATE = str(BUILD_DIR / "translation_sync_state.json")

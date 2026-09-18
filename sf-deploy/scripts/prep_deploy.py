@@ -384,6 +384,8 @@ def build_phase(args, temp_path: Path) -> tuple[dict, dict[str, str]]:
                 "--max-components", str(args.max_components), "--out", str(PLAN)]
     if args.include_drift:
         plan_cmd += ["--include-drift", args.include_drift]
+    if args.new_only:
+        plan_cmd.append("--new-only")
     run(plan_cmd, os.environ.copy(), capture=True)
     plan = json.loads(PLAN.read_text(encoding="utf-8"))
 
@@ -403,22 +405,29 @@ def build_phase(args, temp_path: Path) -> tuple[dict, dict[str, str]]:
          "--plan", str(PLAN)], os.environ.copy(), capture=True)
 
     if plan["lang"] == "off":
-        print("\n[5b] object translations: disabled (--lang off)")
+        print("\n[5b] object translations: skipped (no Field Label (EN) column, "
+              "or --lang off)")
     elif plan["translationState"] != "ok":
         print(f"\n[5b] object translations: {plan['translationState']} — "
               f"{plan['translationNote'][:160]}")
-    elif not plan["translationPackage"]:
-        print("\n[5b] object translations: nothing new to translate")
     else:
-        print(f"\n[5b] object translations ({plan['lang']}, "
-              f"{len(plan['translationPackage'])} new) — patched onto the org's own "
-              f"translation tree")
-        run(["python3", str(SCRIPTS / "generate_object_translation.py"),
-             "--rows", str(temp_path), "--snapshot", str(SNAPSHOT),
-             "--lang", plan["lang"], "--delta", str(PLAN),
-             "--on-unavailable", args.on_translation_unavailable,
-             "--out-root", str(STAGING_TRANSLATIONS)],
-            os.environ.copy(), capture=True)
+        s = plan.get("summary") or {}
+        print(f"\n[5b] English translations ({plan['lang']})")
+        print(f"      {s.get('translationsUnchanged', 0)} unchanged  "
+              f"+ {s.get('translationsNew', 0)} new  "
+              f"~ {s.get('translationsChanged', 0)} changed  "
+              f"{s.get('translationsMissing', 0)} missing EN")
+        if not plan["translationPackage"]:
+            print("      nothing to deploy — sheet EN already matches the org")
+        else:
+            print(f"      packaging {len(plan['translationPackage'])} "
+                  f"translation(s) onto the org's CustomObjectTranslation tree")
+            run(["python3", str(SCRIPTS / "generate_object_translation.py"),
+                 "--rows", str(temp_path), "--snapshot", str(SNAPSHOT),
+                 "--lang", plan["lang"], "--delta", str(PLAN),
+                 "--on-unavailable", args.on_translation_unavailable,
+                 "--out-root", str(STAGING_TRANSLATIONS)],
+                os.environ.copy(), capture=True)
 
     # 6) ONE manifest built from the PLAN's members (not a directory scan, which
     #    can pick up stale metadata left behind by an earlier run).
@@ -546,6 +555,10 @@ def main() -> int:
                          "you have reviewed and want redeployed. Drift is never "
                          "packaged automatically: some type changes require "
                          "delete+recreate and destroy the field's data.")
+    ap.add_argument("--new-only", action="store_true",
+                    help="package NEW English translations only; CHANGED labels "
+                         "are reported, not packaged. Default packages both "
+                         "(label updates are not destructive).")
     ap.add_argument("--max-components", type=int, default=9000,
                     help="component cap per package; larger plans split "
                          "deterministically, keeping each object with its own "

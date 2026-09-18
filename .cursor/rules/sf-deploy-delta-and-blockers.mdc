@@ -215,12 +215,14 @@ and deploy ONLY the new (and, if explicitly requested, changed) fields.
    `Field Label (EN)` (same as WIP / IsDelete / `fullName`).
    `prep_deploy.py` Step 4b runs this automatically:
    ```
-   python scripts/translation_drift.py --rows temp_updates.json --org <ORG> --new-only
+   python scripts/translation_drift.py --rows temp_updates.json --org <ORG>
    python scripts/generate_object_translation.py --rows temp_updates.json \
        --org <ORG> --delta .build/translation_drift_objects.json
    ```
-   Package **only** `NEW_TRANSLATION` (EN filled, no `en_US` in the org).
-   `CHANGED_EN` is reported, not auto-packaged. Retrieve-merge the org
+   Package **`NEW_TRANSLATION` and `CHANGED`** (EN filled and new or different
+   in the org). An English label update is not destructive, unlike field-type
+   drift. Pass `--new-only` to report `CHANGED` without packaging it.
+   Retrieve-merge the org
    `CustomObjectTranslation` `<Obj>__c-en_US` so sibling translations are not
    wiped. Blank EN → WARN `MISSING_TRANSLATION`; still deploy the Japanese
    field; **do not invent English**. Full contract:
@@ -313,9 +315,10 @@ against the delta), so you confirm the WHOLE object matches the source of truth.
   name but whose definition changed is a real, un-deployed change — never treat
   "exists in org" as "matches the sheet."
 - **Name-delta is also NOT enough for English.** When `Field Label (EN)` is on
-  the tab, run `translation_drift.py --new-only` (auto-run by `prep_deploy.py`
-  Step 4b). A field that exists in JA with no `en_US` COT entry is an un-deployed
-  translation. Never write EN into `CustomField.label`. Never invent English.
+  the tab, the plan classifies sheet EN against the org snapshot (auto-run by
+  `prep_deploy.py`). A field that exists in JA with no `en_US` COT entry is an
+  un-deployed translation; a changed EN cell is packaged as `CHANGED`. Never
+  write EN into `CustomField.label`. Never invent English.
 - **Attribute write-back is MANDATORY, not optional.** Any field attribute you
   fix to enable a deploy (formula, `relationshipName`, API name, length/precision,
   picklist set, `referenceTo`, etc.) MUST be written back into the field's SHEET

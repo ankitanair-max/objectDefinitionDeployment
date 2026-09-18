@@ -64,7 +64,7 @@ For each object in the deploy set:
 | Code | When | Package? |
 |---|---|---|
 | `NEW_TRANSLATION` | Field is new in org **or** exists but has no `en_US` field translation, **and** `Field Label (EN)` is filled | **Yes — automatic** (this is the Japan-adds-a-field case) |
-| `CHANGED_EN` | Org `en_US` label ≠ sheet `Field Label (EN)` | **Report only.** Do not auto-package (same as attr_drift — not a silent update). Redeploy only if the user explicitly asks. |
+| `CHANGED_EN` | Org `en_US` label ≠ sheet `Field Label (EN)` | **Yes — automatic.** An English label update is not destructive (unlike a field-type change). Pass `--new-only` to report it without packaging. |
 | `MISSING_TRANSLATION` | Deployable custom field, `Field Label (EN)` blank | WARN; field still deploys in Japanese; no fake EN |
 | Org-only translation | Field translated in org, absent from sheet | Report; do not delete |
 
@@ -74,7 +74,7 @@ For each object in the deploy set:
 **When Japan adds a field later** (the object already has translations):
 
 1. They add the row on the object tab: JA in `Field Label`, EN in **`Field Label (EN)`**, API name in `fullName`.
-2. Next `prep_deploy.py` for that tab: field name-delta creates the CustomField; `translation_drift.py --new-only` marks only that row `NEW_TRANSLATION`.
+2. Next `prep_deploy.py` for that tab: field name-delta creates the CustomField; the translation classifier marks that row `NEW_TRANSLATION` (and any edited EN as `CHANGED`).
 3. `generate_object_translation.py` merges that one EN into the org COT and packages it. Existing translations are left as they are.
 
 No extra spreadsheet, no extra “run translations” command. Blank `Field Label (EN)` on the new row → field still deploys; WARN `MISSING_TRANSLATION`.
@@ -85,14 +85,14 @@ No extra spreadsheet, no extra “run translations” command. Blank `Field Labe
 
 Layered onto `sf-deploy-delta-and-blockers.mdc` Step 3c and `prep_deploy.py` Step 4b. Contract: `sf-object-translation-deploy.mdc`. Column map: `sf-sheet-columns.mdc`. Blank-API fallback matches the `fullName` header (`sf-blank-api-label-fallback-match.mdc`). Pipeline listing: `sf-sheet-deployment.mdc`.
 
-> After field name-delta and attr_drift, for every object in the request, compute CustomObjectTranslation delta from `Field Label (EN)` / `Object Label (EN)` / `Name Field Label (EN)`. Include those members in the same package. Never require a separate translation deploy. Never generate English. Blank EN = WARN, not a hard blocker, unless the client later sets ERROR.
+> After field name-delta and attr_drift, for every object in the request, compute CustomObjectTranslation delta from `Field Label (EN)` / `Object Label (EN)` / `Name Field Label (EN)`. Package `NEW_TRANSLATION` and `CHANGED`. Never require a separate translation deploy. Never generate English. Blank EN = WARN, not a hard blocker, unless the client later sets ERROR.
 
 Scripts:
 
 | Script | Role |
 |---|---|
 | `translation_lib.py` | Shared hash / classify / sheet-row → catalog (no CLI) |
-| `translation_drift.py` | Compare sheet EN vs live org CustomObjectTranslation (`--new-only`) |
+| `translation_drift.py` | Compare sheet EN vs live org CustomObjectTranslation (`--new-only` is opt-in) |
 | `generate_object_translation.py` | Retrieve-merge org file + new EN → `<Obj>__c-en_US` XML |
 | `plan_deploy.py` | Classifies the sheet EN against the org snapshot; the packaged members land in the deployment plan |
 | `prep_deploy.py` | Generates from the plan, in the same package as the fields |
@@ -164,7 +164,7 @@ Retrieve pairing: `CustomObject` + `CustomObjectTranslation` together.
 | JP user on same page | Field labels still show `Field Label` |
 | New field added later | Fill JA + EN on the new row; one normal deploy lands field **and** EN label — no extra process |
 | New field, EN left blank | Field deploys; WARN MISSING_TRANSLATION; UI stays Japanese for EN users for that field only |
-| EN cell edited | Reported as CHANGED_EN; not auto-packaged (`--new-only`) |
+| EN cell edited | Packaged as `CHANGED` in the same `prep_deploy.py` run (delta only). `--new-only` reports it without packaging. |
 | WIP / IsDelete | No translation create |
 
 ---
@@ -183,8 +183,8 @@ Retrieve pairing: `CustomObject` + `CustomObjectTranslation` together.
 
 - Headers `Field Label (EN)`, `Object Label (EN)`, `Name Field Label (EN)` (gated).
 - Enable Translation Workbench + English.
-- `generate_object_translation.py` + `translation_drift.py --new-only` vs live `CustomObjectTranslation`.
-- `prep_deploy.py` Step 4b / delta rule Step 3c package new fields with EN automatically.
+- `generate_object_translation.py` + `translation_drift.py` vs live `CustomObjectTranslation`.
+- `prep_deploy.py` packages new and changed EN automatically in the same deploy as the fields.
 - Standing rules: `sf-object-translation-deploy.mdc`, plus Step 3c and `Field Label (EN)` on the deploy and sheet-column rules.
 - Do **not** add a Translation Catalog tab.
 

@@ -24,8 +24,8 @@ delta says are new:
 
 Future delta (Japan adds a field to an already-translated object):
   1. They add the row (JA in Field Label, EN in Field Label (EN), API in fullName).
-  2. translation_drift --new-only marks that field NEW_TRANSLATION.
-  3. This script patches that one field into the retrieved org translation.
+  2. The next prep_deploy.py classifies that field NEW_TRANSLATION (and any
+     edited EN as CHANGED) and patches those nodes into the retrieved org file.
 
 Usage:
   python scripts/generate_object_translation.py --rows temp_updates.json \

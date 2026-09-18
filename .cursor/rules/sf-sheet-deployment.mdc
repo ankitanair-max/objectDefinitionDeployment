@@ -65,7 +65,7 @@ explicit scope (see step 3).
    `generate_object_translation.py --snapshot .build/org_snapshot.json --delta
    .build/deploy_plan.json` patches the new field into the org's OWN
    `CustomObjectTranslation` tree (no second org read, nothing else dropped).
-   Package only `NEW_TRANSLATION`; report `CHANGED_EN`; do not invent English.
+   Package `NEW_TRANSLATION` and `CHANGED`; do not invent English.
    See `sf-object-translation-deploy.mdc`.
 6. **Build manifest FROM THE PLAN** —
    `python scripts/build_manifest.py --plan .build/deploy_plan.json --out <pkg>`.

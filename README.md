@@ -2,8 +2,10 @@
 
 Tooling and conventions for the SEAP Salesforce **Data-Dictionary deployment
 pipeline**: Google Sheet (source of truth) → validate → package → deploy custom
-objects/fields/tabs/FlexiPages to a Salesforce org, with post-deploy FLS,
-object-permission, and record-page automation.
+objects/fields/tabs/FlexiPages **and English Translation Workbench labels** to a
+Salesforce org, with post-deploy FLS, object-permission, and record-page
+automation. Translations ride the same `prep_deploy.py` command as fields;
+there is no separate translation deploy.
 
 ## Contents
 

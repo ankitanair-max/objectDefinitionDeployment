@@ -30,7 +30,10 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from translation_lib import API_NAME_RE, chunks, soql_in_list  # noqa: E402
+from translation_lib import (  # noqa: E402
+    EN_FLAG, chunks, entries_from_object_rows, format_translation_error,
+    has_translation_columns, is_delete, soql_in_list,
+)
 
 # --------------------------------------------------------------------------- #
 # Rule table  (data_type -> required / optional / forbidden / constraints)
@@ -377,6 +380,8 @@ def validate(rows: list[dict], rep: Report, org_objects: set[str] | None = None)
             if op in {"SUM", "MIN", "MAX"} and not nonblank(r.get("Summarized Field")):
                 rep.error(obj, loc, "summary.field", f"Summarized Field required when operation is {op}")
 
+    validate_translations(rows, rep)
+
     # ---- per-object 40 custom-relationship limit (post-scan) ------------- #
     # Salesforce hard cap: an object may have at most 40 custom relationships
     # (Lookup + MasterDetail). Only counts fields IN THIS DEPLOY SET; the deploy
@@ -393,6 +398,89 @@ def validate(rows: list[dict], rep: Report, org_objects: set[str] | None = None)
             rep.warn(obj, "-", "relationship.limit",
                      f"{n} custom relationships approaching the 40-per-object limit "
                      f"(only counts this deploy set; org may already hold some)")
+
+
+def validate_translations(rows: list[dict], rep: Report) -> None:
+    """Translation-source checks on the existing validation Report.
+
+    Tabs without a ``Field Label (EN)`` column are untranslated — this is a
+    no-op for them, so a plain field deploy never acquires translation errors.
+    Blank EN is a WARN (the Japanese field still deploys); duplicates, parse
+    failures, and missing identifiers on an EN-filled row are ERRORs so no
+    partially valid CustomObjectTranslation is generated.
+    """
+    if not has_translation_columns(rows):
+        return
+
+    for r in rows:
+        if not truthy(r.get(EN_FLAG)):
+            # older payloads: treat any EN cell as "this tab is translated"
+            if not any(str(r.get(k) or "").strip() for k in (
+                    "Field Label (EN)", "Object Label (EN)", "Name Field Label (EN)")):
+                continue
+        if r.get("_type") == "object_meta":
+            obj = str(r.get("Object API Name") or "").strip()
+            if not obj:
+                loc = str(r.get("Object Label") or r.get("_SheetName") or "?")
+                rep.error(loc, "-", "translation.object",
+                          format_translation_error(
+                              obj="(missing)", field="-",
+                              reason="invalid/missing object identifier"))
+            continue
+        if truthy(r.get("WIP")) or is_delete(r.get("IsDelete")):
+            continue
+        en = str(r.get("Field Label (EN)") or "").strip()
+        if not en:
+            continue
+        obj = str(r.get("Object API Name") or "").strip()
+        api = str(r.get("Field API Name") or "").strip()
+        label = str(r.get("Field Label") or "").strip()
+        if not obj:
+            rep.error("?", api or label or "(row)", "translation.object",
+                      format_translation_error(
+                          obj="(missing)", field=api or label or "(missing)",
+                          reason="invalid/missing object identifier"))
+        if not api:
+            rep.error(obj or "?", label or "(row)", "translation.field",
+                      format_translation_error(
+                          obj=obj or "(missing)", field="(missing)",
+                          reason="invalid/missing field identifier"))
+        elif api.endswith("__c"):
+            core = api[:-3]
+            if not API_NAME_RE.match(core) or "__" in core:
+                rep.error(obj or "?", api, "translation.field",
+                          format_translation_error(
+                              obj=obj or "(missing)", field=api,
+                              reason="invalid field identifier"))
+
+    seen: dict[str, dict] = {}
+    for e in entries_from_object_rows(rows):
+        field = str(e.get("field") or e.get("key") or "")
+        obj = str(e.get("component") or "")
+        if e.get("parse_error"):
+            rep.error(obj, field, "translation.parse",
+                      format_translation_error(
+                          obj=obj, field=field,
+                          reason=e["parse_error"]))
+            continue
+        if e.get("lang_error"):
+            rep.error(obj, field, "translation.lang",
+                      format_translation_error(
+                          obj=obj, field=field,
+                          reason=e["lang_error"]))
+            continue
+        eid = e["id"]
+        prev = seen.get(eid)
+        if prev is None:
+            seen[eid] = e
+            continue
+        if (prev.get("translation") or "") != (e.get("translation") or ""):
+            reason = (f"conflicting English translations "
+                      f"{prev.get('translation')!r} vs {e.get('translation')!r}")
+        else:
+            reason = "Duplicate English translation entries found in the source sheet."
+        rep.error(obj, field, "translation.duplicate",
+                  format_translation_error(obj=obj, field=field, reason=reason))
 
 
 def collect_reference_targets(rows: list[dict]) -> set[str]:

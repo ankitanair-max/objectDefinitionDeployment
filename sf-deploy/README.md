@@ -66,6 +66,8 @@ What the delta packages:
 | object exists | only fields the org does not have + their new translations |
 | field already in the org | nothing — never redeployed silently |
 | field definition changed (drift) | nothing, until you pass `--include-drift Obj__c.Field__c` |
+| English label changed (`Field Label (EN)` ≠ org) | the object's `CustomObjectTranslation` (label-only; not destructive) |
+| English label unchanged | nothing |
 | row flagged `WIP` | nothing — ignored entirely |
 | row flagged `IsDelete` | the separate destructive flow — built every run, deployed only with `--deletes` |
 | standard `Name` drift | the CustomObject (Obj__c.Name is not a CustomField member) |
@@ -74,7 +76,9 @@ What the delta packages:
 Re-running with no sheet changes is a no-op: the plan comes out empty, no
 package is built and no org write is attempted. Use `--phase build` (the
 default) for everything except the real deploy, and `--lang` to pick the
-Translation Workbench language (`off` to skip translations).
+Translation Workbench language (`off` to skip translations). Pass `--new-only`
+to report changed English labels without packaging them (new translations are
+still packaged).
 
 A plan larger than `--max-components` splits into `package.part1.xml` …
 `package.partN.xml`; the plan records that index and **every part is deployed,
@@ -176,6 +180,37 @@ python scripts/deploy.py --start --pre-destructive manifest/destructiveChanges.x
   immutable Id, so a failed deploy can never look "already deployed" and one
   sandbox's history can never mask another's.
 - `deploy.py` with no `--start` is **check-only** and never writes to the org.
+
+## English translations (Translation Workbench)
+
+English is part of the **same** `prep_deploy.py` command. There is no
+`deploy-translations` / `translation-deploy` step. The live Data Dictionary is
+the source of truth:
+
+https://docs.google.com/spreadsheets/d/1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ
+
+Locate English by the header **`Field Label (EN)`** (JP `項目ラベル名 (EN)`).
+Japanese `Field Label` stays `CustomField.label`. Tabs without that header are
+untranslated: the translation step is skipped entirely and a field deploy does
+not need Translation Workbench.
+
+| Sheet change | What the next `prep_deploy.py` does |
+|---|---|
+| New object tab with EN filled | packages the CustomObject, its fields, and `<Obj>__c-en_US` |
+| New field row with EN filled | packages the CustomField **and** patches that EN into the org's CustomObjectTranslation |
+| Existing field, EN filled for the first time | packages only the translation member (the field is already in the org) |
+| EN cell edited | packages the translation delta (`CHANGED`) |
+| EN unchanged / blank | nothing to translate (blank EN is a WARN, Japanese still deploys) |
+| Duplicate EN rows, unparseable picklist EN, missing object/field id on an EN-filled row | validation **ERROR** — the deploy is blocked. The message names the object, the field, and the reason. |
+
+Salesforce prerequisites: Setup → Translation Language Settings → enable
+Translation Workbench and activate **English** (`en_US`). The running user
+needs Metadata API access. If the org cannot serve translations, the command
+fails with an actionable message (or continues field-only with
+`--on-translation-unavailable skip`).
+
+Re-running with no sheet/org translation changes is a no-op: the plan is empty
+and no Translation Workbench write is attempted.
 
 ## Validation rules
 

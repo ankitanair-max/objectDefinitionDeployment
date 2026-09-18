@@ -165,19 +165,37 @@ def test_existing_field_missing_en_is_reported_not_packaged():
     print("  ok  existing-field-missing-en-is-reported-not-packaged")
 
 
-def test_changed_en_is_reported_not_packaged():
-    rows = [meta_row(), field_row("TI_Fnt_ProductName__c", "商品名", "Item name")]
+def test_changed_en_is_packaged():
+    """Sheet EN ≠ org EN ⇒ the CustomObjectTranslation member is in the same plan."""
+    rows = [meta_row(), field_row("TI_Fnt_ProductName__c", "商品名", "New Label")]
     snap = snapshot(fields=["TI_Fnt_ProductName__c"],
                     translations={OBJ: org_cot(
-                        OBJ, "en_US", {"TI_Fnt_ProductName__c": "Product name"})})
+                        OBJ, "en_US", {"TI_Fnt_ProductName__c": "Old Label"})})
     plan = plan_for(rows, snap)
     changed = [t for t in plan["translations"] if t["code"] == CHANGED]
-    assert changed and not any(t["package"] for t in changed)
-    assert plan["manifestMembers"] == {}
-    # ...unless the operator explicitly asks for changed translations
-    plan2 = plan_for(rows, snap, new_only=False)
-    assert plan2["manifestMembers"]["CustomObjectTranslation"] == [f"{OBJ}-en_US"]
-    print("  ok  changed-en-is-reported-not-packaged")
+    assert changed and all(t["package"] for t in changed)
+    assert plan["manifestMembers"]["CustomObjectTranslation"] == [f"{OBJ}-en_US"]
+    assert "CustomField" not in plan["manifestMembers"], \
+        "a label-only EN change must not redeploy the CustomField"
+    # --new-only keeps the conservative report-only behaviour
+    parked = plan_for(rows, snap, new_only=True)
+    assert parked["manifestMembers"] == {}
+    print("  ok  changed-en-is-packaged")
+
+
+def test_existing_field_new_translation_is_packaged():
+    """Field already in the org, EN filled, no org translation yet."""
+    rows = [meta_row(), field_row("TI_Fnt_ProductName__c", "商品名", "Product name")]
+    snap = snapshot(fields=["TI_Fnt_ProductName__c"],
+                    translations={OBJ: org_cot(OBJ, "en_US", {})})
+    plan = plan_for(rows, snap)
+    packaged = [t for t in plan["translations"] if t.get("package")]
+    assert packaged and packaged[0]["code"] == NEW
+    assert "TI_Fnt_ProductName__c" in packaged[0]["key"]
+    assert plan["manifestMembers"] == {
+        "CustomObjectTranslation": [f"{OBJ}-en_US"],
+    }
+    print("  ok  existing-field-new-translation-is-packaged")
 
 
 def test_wip_and_isdelete_are_separated():
@@ -226,17 +244,25 @@ def test_attribute_drift_needs_an_explicit_decision():
 def test_translation_for_unknown_field_is_schema_missing():
     """A translation whose target field exists nowhere is a different defect
     from a blank EN cell — and must never be packaged."""
-    rows = [meta_row(), field_row("TI_Fnt_Ghost__c", "幽霊", "Ghost")]
+    from translation_lib import KIND_OBJECT_FIELD, classify, make_entry
+
+    e = make_entry(kind=KIND_OBJECT_FIELD, component=OBJ, aspect="label",
+                   key="TI_Fnt_Ghost__c", language="en_US", master="幽霊",
+                   translation="Ghost")
+    classified = classify(
+        [e], {}, org_schema={OBJ: {"TI_Fnt_ProductName__c"}},
+        planned_fields={OBJ: set()})
+    assert classified[0]["code"] == SCHEMA_MISSING
+    assert classified[0]["package"] is False
+
+    # WIP rows with EN never become catalog entries, so they cannot sneak a
+    # SCHEMA_MISSING translation into the plan either.
+    rows = [meta_row(), field_row("TI_Fnt_Ghost__c", "幽霊", "Ghost", WIP="TRUE")]
     snap = snapshot(fields=["TI_Fnt_ProductName__c"],
                     translations={OBJ: org_cot(OBJ, "en_US", {})})
-    # the field is in neither the org nor the plan: simulate a WIP-parked row
-    # by stripping it from the sheet's deployable set
-    rows[1]["WIP"] = "TRUE"
     plan = plan_for(rows, snap)
-    ghost = [t for t in plan["translations"] if "Ghost" in t["translation"]]
-    assert ghost and ghost[0]["code"] == SCHEMA_MISSING, ghost
-    assert not any(t["package"] for t in plan["translations"])
-    assert plan["summary"]["schemaMissingTranslations"] == 1
+    keys = [t.get("key") for t in plan["translations"]]
+    assert "TI_Fnt_Ghost__c" not in keys
     print("  ok  translation-for-unknown-field-is-schema-missing")
 
 
@@ -634,7 +660,8 @@ def main() -> int:
         test_existing_object_one_new_field,
         test_second_run_is_an_empty_delta,
         test_existing_field_missing_en_is_reported_not_packaged,
-        test_changed_en_is_reported_not_packaged,
+        test_changed_en_is_packaged,
+        test_existing_field_new_translation_is_packaged,
         test_wip_and_isdelete_are_separated,
         test_standard_fields_are_never_custom_field_members,
         test_attribute_drift_needs_an_explicit_decision,

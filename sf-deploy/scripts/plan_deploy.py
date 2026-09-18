@@ -36,8 +36,8 @@ import attr_drift  # noqa: E402
 import build_manifest  # noqa: E402
 import org_snapshot  # noqa: E402
 from translation_lib import (  # noqa: E402
-    BUILD_DIR, CONFLICT, DEFAULT_LANG, DEFAULT_SYNC_STATE, INVALID_LANG, NEW,
-    PARSE_ERROR, SCHEMA_MISSING, apply_new_only, classify,
+    BUILD_DIR, CHANGED, CONFLICT, DEFAULT_LANG, DEFAULT_SYNC_STATE, INVALID_LANG,
+    MISSING, NEW, PARSE_ERROR, SCHEMA_MISSING, UNCHANGED, apply_new_only, classify,
     entries_from_object_rows, has_translation_columns, is_delete,
     load_sync_state, norm, truthy,
 )
@@ -145,7 +145,7 @@ def object_update_reasons(obj: str, new_fields: list[str], rows: list[dict],
 
 
 def build_plan(rows: list[dict], snapshot: dict, *, sheet_id: str, tabs: str,
-               lang: str = DEFAULT_LANG, new_only: bool = True,
+               lang: str = DEFAULT_LANG, new_only: bool = False,
                include_drift: set[str] | None = None,
                drift: dict[str, list[dict]] | None = None,
                sync_state: str | Path = DEFAULT_SYNC_STATE,
@@ -281,6 +281,10 @@ def build_plan(rows: list[dict], snapshot: dict, *, sheet_id: str, tabs: str,
         "schemaMissingTranslations": sum(
             1 for t in translations if t.get("code") == SCHEMA_MISSING),
         "conflicts": sum(1 for t in translations if t.get("code") == CONFLICT),
+        "translationsNew": sum(1 for t in translations if t.get("code") == NEW),
+        "translationsChanged": sum(1 for t in translations if t.get("code") == CHANGED),
+        "translationsUnchanged": sum(1 for t in translations if t.get("code") == UNCHANGED),
+        "translationsMissing": sum(1 for t in translations if t.get("code") == MISSING),
         "deletes": len(delete_members),
         "components": sum(len(v) for v in members.values()),
         "packages": len(build_manifest.plan_parts(members, max_components)),
@@ -315,6 +319,13 @@ def report(plan: dict) -> None:
           f"(approved {len(plan['driftApproved'])})")
     print(f"  new translations {s['newTranslations']} · conflicts {s['conflicts']} · "
           f"schema-missing {s['schemaMissingTranslations']} · deletes {s['deletes']}")
+    if plan.get("lang") not in ("", "off"):
+        print(f"  English translations ({plan['lang']}): "
+              f"{s.get('translationsUnchanged', 0)} unchanged · "
+              f"{s.get('translationsNew', 0)} new · "
+              f"{s.get('translationsChanged', 0)} changed · "
+              f"{s.get('translationsMissing', 0)} missing EN"
+              + ("  [new-only: changed not packaged]" if plan.get("newOnly") else ""))
     for mtype, vals in plan["manifestMembers"].items():
         print(f"  manifest {mtype:26} {len(vals)}")
     parts = plan.get("manifestParts") or []
@@ -335,9 +346,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--sheet-id", default="")
     ap.add_argument("--tabs", default="")
     ap.add_argument("--lang", default=DEFAULT_LANG)
-    ap.add_argument("--new-only", action="store_true", default=True)
+    ap.add_argument("--new-only", action="store_true", dest="new_only",
+                    help="package NEW_TRANSLATION only; CHANGED English is "
+                         "reported, not packaged (default: package both)")
     ap.add_argument("--all-changed", dest="new_only", action="store_false",
-                    help="also package CHANGED translations (default: report only)")
+                    help="package CHANGED translations too (this is the default)")
+    ap.set_defaults(new_only=False)
     ap.add_argument("--include-drift", default="",
                     help="comma-separated Obj__c.Field__c to redeploy despite "
                          "attribute drift (explicit decision, never automatic)")

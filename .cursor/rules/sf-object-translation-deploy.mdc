@@ -1,5 +1,5 @@
 ---
-description: Object-tab English is the header Field Label (EN). Tabs without that header are untranslated and skipped entirely. Future field adds are picked up by translation_drift --new-only in the same prep_deploy as the field delta.
+description: Object-tab English is the header Field Label (EN). Tabs without that header are untranslated and skipped entirely. New fields and changed English labels are packaged by the same prep_deploy as the field delta.
 alwaysApply: true
 ---
 
@@ -65,7 +65,7 @@ in the tree are left untouched.
 | Code | When | Package? |
 |---|---|---|
 | `NEW_TRANSLATION` | EN filled, no `<LANG>` translation in the org | **Yes — automatic** |
-| `CHANGED_EN` | Org EN ≠ sheet EN | **Report only.** Redeploy only if the user asks. |
+| `CHANGED_EN` | Org EN ≠ sheet EN | **Yes — automatic.** Label-only; not destructive. `--new-only` reports without packaging. |
 | `MISSING_TRANSLATION` | Deployable custom field, EN blank | WARN; deploy JA field; **do not invent English** |
 | `SCHEMA_MISSING` | EN targets a field absent from the org AND from this deploy | **No.** The COT member would fail on an unknown field — report it. |
 | `PARSE_ERROR` | EN cell cannot be parsed (e.g. picklist EN count ≠ JA count) | **No — validation ERROR.** Fix the sheet; never silently degrade to MISSING. |
@@ -120,5 +120,6 @@ on the parent. Never emit a `Name` field translation file.
 
 Sheet row: JA in `Field Label`, EN in `Field Label (EN)`, API in `fullName`.
 Next `prep_deploy.py` for that tab: field name-delta creates the CustomField;
-`--new-only` marks only that row `NEW_TRANSLATION`; generate patches it into the
-org COT. Existing translations stay as they are.
+the translation classifier marks that row `NEW_TRANSLATION` (and any edited EN
+as `CHANGED`); generate patches it into the org COT. Existing translations stay
+as they are.
