@@ -1,5 +1,5 @@
 ---
-description: Semantics of the object-tab columns after relationshipName in the client's finalized "Format" sheet — Y deleteConstraint, Z Tab, AA section, AD IsDelete (delete flag), AE WIP (skip), AH "GDC AI Tool Comments" (AI review-comment column), AI "Deployment Status" (per-field org deploy status), AJ–BA spare AI columns, BB–BV actor/FLS columns. Governs which field rows to include/skip/delete, where the AI writes review comments, and where per-field deploy status is recorded. Locate columns by HEADER NAME, not fixed index.
+description: Semantics of the object-tab columns after relationshipName in the client's finalized "Format" sheet — Y deleteConstraint, Z Tab, AA section, AD IsDelete, AE WIP, AH GDC AI Tool Comments, AI Deployment Status, AK Field Label (EN) for CustomObjectTranslation, remaining AJ/AL–BA spare AI columns, BB–BV actor/FLS. Locate columns by HEADER NAME, not fixed index.
 alwaysApply: true
 ---
 
@@ -24,7 +24,9 @@ the 0-based indices below are only a fallback.
 | AG | 32 | reviewComments   | Discussion column. **Ignore.** |
 | AH | 33 | **GDC AI Tool Comments** | **AI review-comment column (OUR designated use).** The AI writes its review/validation/fix notes here — see below. (Formerly `FreeColumnGDC1`; header renamed by client request.) |
 | AI | 34 | **Deployment Status** | **Per-field org deploy-status column (OUR designated use).** The AI writes whether the field is present in the target org — see below. (Formerly `FreeColumnGDC2`.) |
-| AJ–BA | 35–52 | FreeColumnGDC3–20 | Spare AI columns — unassigned; available for future AI purposes. |
+| AJ | 35 | FreeColumnGDC3 | Spare AI column — unassigned. |
+| AK | 36 | **Field Label (EN)** | **English label for Translation Workbench** (`CustomObjectTranslation` `en_US`). Header aliases: `Field Label (EN)`, `項目ラベル名 (EN)`. On Format tabs the first field cell is typically **AK11**; object English may sit at **AK1**. Formerly spare `FreeColumnGDC4`. Locate by **header**, never by letter. Column D is `fullName` — do not treat it as English. Tabs without this header are untranslated. See `sf-object-translation-deploy.mdc`. |
+| AL–BA | 37–52 | FreeColumnGDC5–20 | Spare AI columns — unassigned; available for future AI purposes. |
 | BB–BV | 53–73 | actor / Persona cols | Actor columns for field-level security **later**. **Ignore for now.** |
 | BW+ | 74+ | FreeColumnJP1…  | Discussion columns. **Ignore.** |
 
@@ -41,12 +43,14 @@ the 0-based indices below are only a fallback.
 3. **Live reads:** never evaluate WIP or IsDelete from a cached snapshot — read
    the sheet live (`read-sheet-live.mdc`).
 4. **Header-driven columns:** locate `Tab`, `section`, `IsDelete`, `WIP`,
-   `GDC AI Tool Comments` (AH), and `Deployment Status` (AI) by header name (fall
-   back to the indices above only if the header is absent). The scripts
-   `fetch_sheet.py`, `mark_wip.py`, `write_back.py`, `write_ai_comments.py`,
-   `write_deploy_status.py` follow this. Note AH's header text is now
+   `GDC AI Tool Comments` (AH), `Deployment Status` (AI), `fullName`, and
+   `Field Label (EN)` (AK) by header name (fall back to the indices above only
+   if the header is absent). The scripts `fetch_sheet.py`, `mark_wip.py`,
+   `write_back.py`, `write_ai_comments.py`, `write_deploy_status.py`,
+   `translation_drift.py` follow this. Note AH's header text is now
    **`GDC AI Tool Comments`** (was `FreeColumnGDC1`) — match either for
-   backwards-compat, prefer the new name.
+   backwards-compat, prefer the new name. **Never assume column D is English**
+   — D is `fullName` on Format tabs; EN is wherever `Field Label (EN)` is.
 5. **Tab (Z) + section (AA):** page-layout inputs — `Tab` = top-level record-page
    tab, `section` = section within it. Consume only when doing page-layout work.
 6. **Discussion columns (AB, AC, AF, AG, BW+):** never write to them; they belong

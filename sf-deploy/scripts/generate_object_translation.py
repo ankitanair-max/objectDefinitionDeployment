@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-generate_object_translation.py — CustomObjectTranslation XML from col D EN.
+generate_object_translation.py — CustomObjectTranslation XML from Field Label (EN).
 
 Source of truth: the object-definition tab on the live Data Dictionary sheet
 https://docs.google.com/spreadsheets/d/1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ
-English lives in **column D**, header ``Field Label (EN)`` (same layout as the
-20 objects filled 2026-09-17). Japanese in ``Field Label`` (col C) stays
-CustomField.label.
+English is the header ``Field Label (EN)`` (typically column AK on Format tabs).
+Japanese in ``Field Label`` stays CustomField.label. Locate EN by header, never
+by letter; column D is ``fullName``.
 
 Future delta (Japan adds a field to an already-translated object):
-  1. They add the row (JA in C, EN in D, API in E after the EN-column insert).
+  1. They add the row (JA in Field Label, EN in Field Label (EN), API in fullName).
   2. translation_drift --new-only marks that field NEW_TRANSLATION.
   3. This script retrieves the org's existing <Obj>-en_US translation, MERGES
      only the new field's EN, and writes the combined file so siblings are not

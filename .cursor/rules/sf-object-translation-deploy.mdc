@@ -1,22 +1,47 @@
 ---
-description: Object-tab English lives in column D (Field Label (EN)). Future field adds on already-translated objects are picked up by translation_drift --new-only in the same prep_deploy as the field delta.
-globs: sf-deploy/scripts/{fetch_sheet,translation_lib,translation_drift,generate_object_translation,prep_deploy,generate_xml}.py
-alwaysApply: false
+description: Object-tab English is the header Field Label (EN), never a fixed column letter. Future field adds are picked up by translation_drift --new-only in the same prep_deploy as the field delta. Always on for every object deploy.
+alwaysApply: true
 ---
 
-# Object translation delta (column D EN + new-field only)
+# Object translation delta (header `Field Label (EN)` + new-field only)
 
-English for object/field labels is **column D**, header `Field Label (EN)` (layout used on the 20 objects filled 2026-09-17), on the live Data Dictionary sheet
+English for object/field labels is the column whose header is **`Field Label (EN)`**
+(JP `項目ラベル名 (EN)`). Locate it by **header name**, never by letter. On Format
+tabs that is typically **AK** (first field cell **AK11**; object English is row 1
+of the same column, typically **AK1**). Column **D** is `fullName`. Untranslated
+tabs have no `Field Label (EN)` header; do not invent one or treat `fullName` as
+English. `fetch_sheet.py` reads object EN from row 1 of the EN column via
+`col_map`, not from a hardcoded letter.
+
+Live Data Dictionary:
 https://docs.google.com/spreadsheets/d/1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ
-Japanese `Field Label` (col C) remains `CustomField.label`. Locate the EN column by **header name**; only treat physical column D as EN when that header is present.
+
+Japanese `Field Label` remains `CustomField.label`. Do **not** write `Field Label (EN)`
+into `generate_xml.py` field `<label>`.
+
+## Every object/field deploy (not a separate project)
+
+`prep_deploy.py` Step 4b always runs after field XML:
+
+1. `translation_drift.py --rows temp_updates.json --org <ORG> --new-only`
+2. `generate_object_translation.py --rows … --delta …` — retrieve the org
+   `CustomObjectTranslation` `<Obj>__c-en_US` and **merge** the new field so
+   sibling EN is not wiped.
+3. The member `CustomObjectTranslation:<Obj>__c-en_US` rides in the **same**
+   package as the CustomField delta.
+
+| Code | When | Package? |
+|---|---|---|
+| `NEW_TRANSLATION` | EN filled, no `en_US` translation in the org | **Yes — automatic** |
+| `CHANGED_EN` | Org EN ≠ sheet EN | **Report only.** Redeploy only if the user asks. |
+| `MISSING_TRANSLATION` | Deployable custom field, EN blank | WARN; deploy JA field; **do not invent English** |
+
+Honor WIP / IsDelete / `END[項目]` like every other field row. Blank EN is a WARN,
+not a Step 0 hard blocker.
 
 ## Future field add (Japan team)
 
-When a field is added to an object that already has translations:
-
-1. Sheet row: JA in `Field Label`, EN in `Field Label (EN)` / col D, API in `fullName`. Honor WIP / IsDelete / `END[項目]` like every other field row.
-2. `prep_deploy.py` Step 4b runs `translation_drift.py --new-only` against live `CustomObjectTranslation`.
-3. Package **only** `NEW_TRANSLATION` (EN filled, no `en_US` translation in the org). `CHANGED_EN` is reported, not auto-packaged.
-4. `generate_object_translation.py` **retrieves the org COT and merges the new field** so sibling translations are not wiped. The member `CustomObjectTranslation:<Obj>__c-en_US` rides in the **same** package as the new CustomField.
-
-Do not invent English for a blank col D (WARN `MISSING_TRANSLATION`). Do not write col D into `generate_xml.py` field `<label>`.
+Sheet row: JA in `Field Label`, EN in `Field Label (EN)`, API in `fullName`.
+Next `prep_deploy.py` for that tab: field name-delta creates the CustomField;
+`--new-only` marks only that row `NEW_TRANSLATION`; generate merges it into the
+org COT. Existing translations stay as they are.

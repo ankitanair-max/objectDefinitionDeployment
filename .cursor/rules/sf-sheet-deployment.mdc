@@ -40,15 +40,26 @@ Working directory is always `sf-deploy/`.
      package, do not deploy. Show the user the failing rows and ask them to fix
      the sheet, then re-fetch.
 3. **Generate** — `python scripts/generate_xml.py` → writes `force-app/main/default/objects/**`.
-4. **Build manifest** — `python scripts/build_manifest.py --out manifest/package.xml`
-   (add `--only Obj__c,Obj2__c` for an incremental / partial deploy).
-5. **Deploy** — `scripts/deploy.py` (see gating below).
-6. **Report** — after a successful real deploy, append/refresh the object's tab in
+   Japanese `Field Label` only — never write `Field Label (EN)` into `CustomField.label`.
+4. **Translations (when the tab has `Field Label (EN)`)** — `prep_deploy.py` Step 4b
+   (not an optional extra command):
+   `translation_drift.py --new-only` then `generate_object_translation.py`
+   (retrieve-merge org `CustomObjectTranslation` `<Obj>__c-en_US`).
+   Package only `NEW_TRANSLATION`; report `CHANGED_EN`; do not invent English.
+   See `sf-object-translation-deploy.mdc`. Prefer
+   `python scripts/prep_deploy.py --org "<ORG>" --tabs "<tab>"` so 4b is not skipped.
+5. **Build manifest** — `python scripts/build_manifest.py --out manifest/package.xml`
+   (add `--only Obj__c,Obj2__c` for an incremental / partial deploy). Include
+   `CustomObjectTranslation` members produced in step 4.
+6. **Deploy** — `scripts/deploy.py` (see gating below).
+7. **Report** — after a successful real deploy, append/refresh the object's tab in
    `reports/Object_Deployment_Report.xlsx` via `scripts/build_object_report.py`
    (see "Post-deploy report" below).
 
-Steps 1–4 can be run together with:
-`python scripts/run.py --spreadsheet-id <ID> [--tabs ...] [--only ...]`
+Steps 1–5 can be run together with:
+`python scripts/prep_deploy.py --org "<ORG>" --tabs "<tab1,tab2>"`
+(`run.py` still covers fetch→validate→generate→manifest but does **not** run
+translation Step 4b — use `prep_deploy.py` for any translated object.)
 
 ## Incremental deploys
 

@@ -23,7 +23,7 @@ def _field(obj, api, en, source="sheet"):
 
 
 def test_japan_adds_one_field():
-    """Object already has translations; Japan adds TI_Fnt_New__c with col D filled."""
+    """Object already has translations; Japan adds TI_Fnt_New__c with Field Label (EN) filled."""
     obj = "TI_Fnt_ShipoutMovein__c"
     existing = _field(obj, "TI_Fnt_ProductName__c", "Product name")
     existing["source"] = "org"

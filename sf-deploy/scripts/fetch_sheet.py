@@ -242,7 +242,6 @@ def build_col_map(header_row: list, jp_header_row: list | None = None) -> dict[i
         if "表示ラベル" in jph and "(en)" in jph_l:
             col_map[idx] = "Field Label (EN)"
         elif "項目ラベル名" in jph and "(en)" in jph_l:
-            # 2026-09-17 layout: col D JP header on the 20 translated object tabs
             col_map[idx] = "Field Label (EN)"
         elif ("選択リスト" in jph or "picklist" in jph_l) and "(en)" in jph_l:
             col_map[idx] = "Picklist Values (EN)"
@@ -326,14 +325,15 @@ def parse_tab(title: str, grid: list[list], object_api_hint: str = "") -> list[d
     helper = find_helper_cols(grid[header_idx])
     obj_meta = parse_object_header(grid, header_idx)
 
-    # Column D = Field Label (EN) on the 20 translated tabs (inserted 2026-09-17).
-    # Object-level English was written in D1 on those tabs. Locate by header, not
-    # by assuming D is always EN (untranslated tabs still have fullName in D).
-    hdr_l = [norm(c).lower() for c in grid[header_idx]]
-    if len(hdr_l) > 3 and hdr_l[3] in {"field label (en)", "label (en)"}:
-        d1 = norm(grid[0][3]) if grid and len(grid[0]) > 3 else ""
-        if d1 and not obj_meta.get("Object Label (EN)"):
-            obj_meta["Object Label (EN)"] = d1
+    # Object-level English is row 1 of the Field Label (EN) column (typically AK1).
+    # Locate by header via col_map — never assume a column letter.
+    en_cols = [i for i, k in col_map.items() if k == "Field Label (EN)"]
+    if en_cols and grid:
+        c = en_cols[0]
+        row1 = grid[0] if grid else []
+        obj_en = norm(row1[c]) if c < len(row1) else ""
+        if obj_en and not obj_meta.get("Object Label (EN)"):
+            obj_meta["Object Label (EN)"] = obj_en
 
     # Resolve object API: header value > index-tab hint > (leave blank -> warn)
     obj_api = norm(obj_meta.get("Object API Name")) or norm(object_api_hint)

@@ -452,8 +452,8 @@ def build_field_xml(row: dict) -> ET.Element | None:
     """
     field_api = row.get("Field API Name", "").strip()
     raw_type = row.get("Data Type", "").strip()
-    # Master label is Japanese (Field Label / col C). Field Label (EN) / col D
-    # is Translation Workbench only — never write it into CustomField.label.
+    # Master label is Japanese (Field Label). Field Label (EN) is Translation
+    # Workbench only — never write it into CustomField.label.
     label = (row.get("Field Label") or row.get("Field Label (JA)") or "").strip()
     type_specific = str(row.get("Type Specific Value") or "").strip()
 
