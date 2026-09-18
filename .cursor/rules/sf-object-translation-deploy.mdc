@@ -1,5 +1,5 @@
 ---
-description: Object-tab English is the header Field Label (EN). Future field adds are picked up by translation_drift --new-only in the same prep_deploy as the field delta. Always on for every object deploy.
+description: Object-tab English is the header Field Label (EN). Tabs without that header are untranslated and skipped entirely. Future field adds are picked up by translation_drift --new-only in the same prep_deploy as the field delta.
 alwaysApply: true
 ---
 
@@ -17,29 +17,87 @@ https://docs.google.com/spreadsheets/d/1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8u
 Japanese `Field Label` remains `CustomField.label`. Do **not** write `Field Label (EN)`
 into `generate_xml.py` field `<label>`.
 
+## No EN header ⇒ the whole translation step is SKIPPED (mandatory)
+
+A tab with no `Field Label (EN)` column is untranslated, so the translation
+step must add **zero** dependencies to that deploy: no catalog entries, no org
+session, no Metadata API call. `fetch_sheet.py` stamps every row with
+`_HasFieldLabelEN`; `has_translation_columns()` gates Step 4b, and
+`entries_from_object_rows()` drops rows from untranslated tabs. Never let an
+ordinary field deploy start needing the Translation Workbench.
+
 ## Every object/field deploy (not a separate project)
 
-`prep_deploy.py` Step 4b always runs after field XML:
+`prep_deploy.py` Step 4b runs after field XML whenever the tab HAS the EN header:
 
-1. `translation_drift.py --rows temp_updates.json --org <ORG> --new-only`
-2. `generate_object_translation.py --rows … --delta …` — retrieve the org
-   `CustomObjectTranslation` `<Obj>__c-en_US` and **merge** the new field so
-   sibling EN is not wiped.
-3. The member `CustomObjectTranslation:<Obj>__c-en_US` rides in the **same**
+1. `translation_drift.py --rows temp_updates.json --org <ORG> --lang <LANG> --new-only`
+2. `generate_object_translation.py --rows … --lang <LANG> --delta …` — read the
+   org `CustomObjectTranslation` `<Obj>__c-<LANG>` and **patch** the new field
+   into it, so sibling translations are not wiped.
+3. The member `CustomObjectTranslation:<Obj>__c-<LANG>` rides in the **same**
    package as the CustomField delta.
+
+`--lang` defaults to `en_US` and is a `prep_deploy.py` flag (`--lang off` skips
+translations entirely). Only the selected language directory
+(`objectTranslations/<Obj>__c-<LANG>`) is regenerated — other languages staged
+in the tree are left untouched.
 
 | Code | When | Package? |
 |---|---|---|
-| `NEW_TRANSLATION` | EN filled, no `en_US` translation in the org | **Yes — automatic** |
+| `NEW_TRANSLATION` | EN filled, no `<LANG>` translation in the org | **Yes — automatic** |
 | `CHANGED_EN` | Org EN ≠ sheet EN | **Report only.** Redeploy only if the user asks. |
 | `MISSING_TRANSLATION` | Deployable custom field, EN blank | WARN; deploy JA field; **do not invent English** |
+| `PARSE_ERROR` | EN cell cannot be parsed (e.g. picklist EN count ≠ JA count) | **No — validation ERROR.** Fix the sheet; never silently degrade to MISSING. |
+| `INVALID_LANG` | Language code is not a Translation Workbench code | **No — validation ERROR.** |
 
 Honor WIP / IsDelete / `END[項目]` like every other field row. Blank EN is a WARN,
 not a Step 0 hard blocker.
+
+## PATCH, never rebuild — a COT deploys as the WHOLE object-language pair
+
+Anything missing from the file we write is **erased** in the org. A
+`CustomObjectTranslation` carries far more than field labels: `recordTypes`,
+`layouts`, `validationRules`, `fieldSets`, `quickActions`, `webLinks`,
+`sharingReasons`, `workflowTasks`, `gender` / `startsWith`, and the plural /
+case / possessive `caseValues` variants.
+
+So the generator MUST keep the org's element tree and patch only the nodes the
+delta marks new (`split_object_translation` → patch → `render_metadata`):
+
+- every unmentioned parent node is written back verbatim,
+- every already-translated field keeps its own `<Field>.fieldTranslation-meta.xml`,
+- only the intended field file (and, if changed, the base singular `caseValues`)
+  is modified.
+
+Never rebuild the parent file from a reduced model of field labels.
+
+## Standard `Name` is the parent `<nameFieldLabel>`
+
+The standard Name field is translated by the PARENT
+`CustomObjectTranslation/<nameFieldLabel>` — **not** by a
+`Name.fieldTranslation-meta.xml`. Read `Name Field Label (EN)` from the
+object-meta row, parse the org's existing `<nameFieldLabel>`, and write it back
+on the parent. Never emit a `Name` field translation file.
+
+## Auth + state are machine- and sandbox-agnostic
+
+- **Auth:** sessions come from the supported CLI (`sf org display --verbose
+  --json --target-org <ORG>`). Never decrypt the CLI keychain, never assume
+  `~/.sfdx`, `~/.local/share/sf/...`, or a rewritten `HOME`. `prep_deploy.py`
+  inherits the environment by default; `--sf-home` / `--xdg-data-home` are
+  opt-in sandbox overrides.
+- **Preflight:** if the org cannot serve translations for `<LANG>` (Translation
+  Workbench off, language not activated), the tools raise an actionable error
+  naming Setup → Translation Language Settings. `--on-unavailable skip`
+  (`prep_deploy.py --on-translation-unavailable skip`) is the explicit opt-out
+  that deploys the fields without translations.
+- **State:** `.build/translation_sync_state.json` is keyed by target **org Id**,
+  never by alias, so one sandbox's hashes can never mark another sandbox's
+  translation "unchanged".
 
 ## Future field add (Japan team)
 
 Sheet row: JA in `Field Label`, EN in `Field Label (EN)`, API in `fullName`.
 Next `prep_deploy.py` for that tab: field name-delta creates the CustomField;
-`--new-only` marks only that row `NEW_TRANSLATION`; generate merges it into the
+`--new-only` marks only that row `NEW_TRANSLATION`; generate patches it into the
 org COT. Existing translations stay as they are.

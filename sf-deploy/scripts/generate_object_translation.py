@@ -7,16 +7,29 @@ https://docs.google.com/spreadsheets/d/1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8u
 English is the header ``Field Label (EN)``. Japanese in ``Field Label`` stays
 CustomField.label. Locate EN by header name (same as fullName / WIP / IsDelete).
 
+Tabs WITHOUT a ``Field Label (EN)`` column are untranslated: they produce no
+entries at all, so no org session and no Metadata API call is needed for them.
+
+A CustomObjectTranslation deploys as one whole object-language member, so
+anything missing from the file we write is erased in the org. This script
+therefore never rebuilds the file from our own model. It reads the org's
+existing translation, keeps its element tree, and patches ONLY the nodes the
+delta says are new:
+
+  * the parent keeps its recordTypes, layouts, validationRules, fieldSets,
+    quickActions, webLinks, sharingReasons, workflowTasks, gender/startsWith
+    and its plural/case caseValues variants,
+  * every already-translated field keeps its own file verbatim,
+  * the standard Name field is translated through the parent <nameFieldLabel>.
+
 Future delta (Japan adds a field to an already-translated object):
   1. They add the row (JA in Field Label, EN in Field Label (EN), API in fullName).
   2. translation_drift --new-only marks that field NEW_TRANSLATION.
-  3. This script retrieves the org's existing <Obj>-en_US translation, MERGES
-     only the new field's EN, and writes the combined file so siblings are not
-     untranslated. Existing translations are not redeployed as a change set.
+  3. This script patches that one field into the retrieved org translation.
 
 Usage:
   python scripts/generate_object_translation.py --rows temp_updates.json \
-      --org ERPDEV01 --lang en_US --delta .build/translation_drift_objects.json
+      --org <ORG> --lang en_US --delta .build/translation_drift_objects.json
 """
 from __future__ import annotations
 
@@ -26,22 +39,27 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-sys.path.insert(0, "scripts")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from translation_lib import (  # noqa: E402
-    DEFAULT_LANG, KIND_NAME_FIELD, KIND_OBJECT_FIELD, KIND_OBJECT_HELP,
-    KIND_OBJECT_LABEL, KIND_OBJECT_PICKLIST, KIND_OBJECT_REL,
-    entries_from_object_rows, esc, load_token, parse_object_translation,
-    read_metadata, write_xml,
+    CFT_CHILD_ORDER, COT_CHILD_ORDER, DEFAULT_LANG, KIND_NAME_FIELD,
+    KIND_OBJECT_FIELD, KIND_OBJECT_HELP, KIND_OBJECT_LABEL, KIND_OBJECT_PICKLIST,
+    KIND_OBJECT_REL, REPO_ROOT, OrgAuthError, TranslationUnavailable,
+    entries_from_object_rows, field_element, has_translation_columns, norm,
+    org_auth, read_object_translations, render_metadata, set_object_label,
+    set_parent_text, set_picklist_translation, set_text, split_object_translation,
+    write_xml,
 )
 
-OUT_ROOT = Path("force-app/main/default/objectTranslations")
+OUT_ROOT = REPO_ROOT / "force-app/main/default/objectTranslations"
+
+TRANSLATION_KINDS = {KIND_OBJECT_LABEL, KIND_NAME_FIELD, KIND_OBJECT_FIELD,
+                     KIND_OBJECT_HELP, KIND_OBJECT_PICKLIST, KIND_OBJECT_REL}
 
 
 def _group(entries: list[dict]) -> dict[str, list[dict]]:
     g: dict[str, list[dict]] = defaultdict(list)
     for e in entries:
-        if e["kind"] in {KIND_OBJECT_LABEL, KIND_NAME_FIELD, KIND_OBJECT_FIELD,
-                         KIND_OBJECT_HELP, KIND_OBJECT_PICKLIST, KIND_OBJECT_REL}:
+        if e["kind"] in TRANSLATION_KINDS:
             g[e["component"]].append(e)
     return g
 
@@ -50,9 +68,8 @@ def _merge_org(sheet_entries: list[dict], org_by_id: dict[str, dict],
                overlay_ids: set[str] | None) -> dict[str, dict]:
     """Org translations stay; overlay only the NEW (packaged) sheet entries.
 
-    Deploying CustomObjectTranslation is a whole object-language member. A file
-    that contains only the new field would untranslate every sibling. So we
-    retrieve the org file, add the new EN labels, and write the union.
+    Kept as the flat view used for reporting and tests; the file writer works
+    on the org's element tree so unmodelled nodes survive untouched.
     """
     merged = dict(org_by_id)
     for e in sheet_entries:
@@ -63,62 +80,53 @@ def _merge_org(sheet_entries: list[dict], org_by_id: dict[str, dict],
     return merged
 
 
-def render_object_file(obj: str, lang: str, entries: list[dict]) -> str:
-    obj_label = next((e["translation"] for e in entries
-                      if e["kind"] == KIND_OBJECT_LABEL and e.get("translation")), "")
-    name_en = next((e["translation"] for e in entries
-                    if e["kind"] == KIND_NAME_FIELD and e.get("translation")), "")
-    lines = [
-        f'<CustomObjectTranslation xmlns="http://soap.sforce.com/2006/04/metadata">',
-    ]
-    if obj_label:
-        lines += [
-            "    <caseValues>",
-            "        <plural>false</plural>",
-            f"        <value>{esc(obj_label)}</value>",
-            "    </caseValues>",
-        ]
-    if name_en:
-        # Standard Name field translation rides on the object file via <nameFieldLabel>
-        # in some API versions; source format uses a sibling Name.fieldTranslation.
-        pass
-    lines.append("</CustomObjectTranslation>")
-    lines.append("")
-    return "\n".join(lines)
+def _field_of(entry: dict) -> str:
+    return norm(entry.get("field")) or norm(entry["key"]).split("::", 1)[0]
 
 
-def render_field_file(field: str, entries: list[dict]) -> str:
-    label = next((e["translation"] for e in entries
-                  if e["kind"] == KIND_OBJECT_FIELD and e.get("translation")), "")
-    help_ = next((e["translation"] for e in entries
-                  if e["kind"] == KIND_OBJECT_HELP and e.get("translation")), "")
-    rel = next((e["translation"] for e in entries
-                if e["kind"] == KIND_OBJECT_REL and e.get("translation")), "")
-    picks = [e for e in entries if e["kind"] == KIND_OBJECT_PICKLIST and e.get("translation")]
-    lines = [
-        f'<CustomFieldTranslation xmlns="http://soap.sforce.com/2006/04/metadata">',
-    ]
-    if label:
-        lines.append(f"    <label>{esc(label)}</label>")
-    else:
-        # Keep the required <label> element; empty comment preserves org master.
-        lines.append("    <label><!-- untranslated --></label>")
-    if help_:
-        lines.append(f"    <help>{esc(help_)}</help>")
-    lines.append(f"    <name>{esc(field)}</name>")
-    if rel:
-        lines.append(f"    <relationshipLabel>{esc(rel)}</relationshipLabel>")
-    for p in picks:
-        master = p.get("master") or (p["key"].split("::", 1)[1] if "::" in p["key"] else "")
-        lines += [
-            "    <picklistValues>",
-            f"        <masterLabel>{esc(master)}</masterLabel>",
-            f"        <translation>{esc(p['translation'])}</translation>",
-            "    </picklistValues>",
-        ]
-    lines.append("</CustomFieldTranslation>")
-    lines.append("")
-    return "\n".join(lines)
+def patch_translation(org_rec, entries: list[dict]):
+    """Apply `entries` onto the org's translation tree.
+
+    Returns (parent_children, {fieldName: <fields> element}); every node the
+    entries do not mention is the org's own, unmodified.
+    """
+    parent, fields = split_object_translation(org_rec)
+
+    def field(name: str):
+        if name not in fields:
+            fields[name] = field_element(name)
+        return fields[name]
+
+    for e in entries:
+        value = norm(e.get("translation"))
+        if not value:
+            continue
+        kind = e["kind"]
+        if kind == KIND_OBJECT_LABEL:
+            parent = set_object_label(parent, value)
+        elif kind == KIND_NAME_FIELD:
+            parent = set_parent_text(parent, "nameFieldLabel", value)
+        elif kind == KIND_OBJECT_FIELD:
+            set_text(field(_field_of(e)), "label", value)
+        elif kind == KIND_OBJECT_HELP:
+            set_text(field(_field_of(e)), "help", value)
+        elif kind == KIND_OBJECT_REL:
+            set_text(field(_field_of(e)), "relationshipLabel", value)
+        elif kind == KIND_OBJECT_PICKLIST:
+            master = norm(e.get("master")) or norm(e["key"]).split("::", 1)[-1]
+            set_picklist_translation(field(_field_of(e)), master, value)
+    return parent, fields
+
+
+def write_translation_dir(root: Path, obj: str, lang: str,
+                          parent, fields: dict) -> int:
+    folder = root / f"{obj}-{lang}"
+    write_xml(folder / f"{obj}-{lang}.objectTranslation-meta.xml",
+              render_metadata("CustomObjectTranslation", parent, COT_CHILD_ORDER))
+    for name, el in sorted(fields.items()):
+        write_xml(folder / f"{name}.fieldTranslation-meta.xml",
+                  render_metadata("CustomFieldTranslation", list(el), CFT_CHILD_ORDER))
+    return len(fields)
 
 
 def main() -> int:
@@ -128,6 +136,8 @@ def main() -> int:
     ap.add_argument("--delta", default="", help="translation_drift.json — only objects with PKG rows")
     ap.add_argument("--org", default="")
     ap.add_argument("--lang", default=DEFAULT_LANG)
+    ap.add_argument("--on-unavailable", choices=["error", "skip"], default="error",
+                    help="org without Translation Workbench / the language active")
     ap.add_argument("--out-root", default=str(OUT_ROOT))
     args = ap.parse_args()
 
@@ -136,8 +146,14 @@ def main() -> int:
         entries.extend(json.loads(Path(args.catalog).read_text(encoding="utf-8")))
     if args.rows:
         rows = json.loads(Path(args.rows).read_text(encoding="utf-8"))
-        entries.extend(entries_from_object_rows(rows, lang=args.lang))
+        if has_translation_columns(rows):
+            entries.extend(entries_from_object_rows(rows, lang=args.lang))
+        elif not entries:
+            print("generate_object_translation: no 'Field Label (EN)' column on the "
+                  "target tab(s) — untranslated, nothing to generate.")
+            return 0
     entries = [e for e in entries if e.get("language", args.lang) == args.lang]
+    entries = [e for e in entries if not e.get("parse_error")]
     if not entries:
         print("generate_object_translation: no catalog entries — nothing to write.")
         return 0
@@ -148,60 +164,52 @@ def main() -> int:
         package_ids = {d["id"] for d in delta if d.get("package")}
 
     grouped = _group(entries)
-    tok = inst = ver = None
+    targets = {obj: ents for obj, ents in grouped.items()
+               if any(e.get("translation") for e in ents)
+               and (package_ids is None
+                    or any(e["id"] in package_ids for e in ents))}
+    if not targets:
+        print("generate_object_translation: delta packages nothing — no file written.")
+        return 0
+
+    auth = None
     if args.org:
-        a = load_token(args.org)
-        tok, inst, ver = a["accessToken"], a["instanceUrl"].rstrip("/"), a["apiVersion"]
+        try:
+            auth = org_auth(args.org)
+        except OrgAuthError as e:
+            print(f"❌ {e}")
+            return 1
 
-    written = 0
     root = Path(args.out_root)
-    for obj, ents in grouped.items():
-        # skip objects with no EN at all
-        if not any(e.get("translation") for e in ents):
-            continue
-        if package_ids is not None:
-            if not any(e["id"] in package_ids for e in ents):
-                continue
+    written = 0
+    for obj, ents in sorted(targets.items()):
+        org_rec = None
+        if auth:
+            try:
+                recs = read_object_translations([obj], args.lang, auth)
+            except TranslationUnavailable as e:
+                if args.on_unavailable == "skip":
+                    print(f"  ⏭  {obj}-{args.lang}: skipped — {e}")
+                    continue
+                print(f"❌ {e}")
+                return 1
+            org_rec = recs[0] if recs else None
+        elif package_ids is None:
+            print(f"  ⚠️  {obj}-{args.lang}: no --org, writing sheet-only translation "
+                  f"(existing org translations are NOT merged).")
 
-        org_by_id: dict[str, dict] = {}
-        if tok:
-            recs = read_metadata("CustomObjectTranslation", [f"{obj}-{args.lang}"],
-                                 tok, inst, ver)
-            if recs:
-                org_by_id = parse_object_translation(recs[0], obj, args.lang)
-
-        merged = _merge_org(ents, org_by_id, package_ids)
-        merged_list = list(merged.values())
-
-        folder = root / f"{obj}-{args.lang}"
-        write_xml(folder / f"{obj}-{args.lang}.objectTranslation-meta.xml",
-                  render_object_file(obj, args.lang, merged_list))
-
-        # Name field
-        name_ents = [e for e in merged_list if e.get("key") == "Name"
-                     and e["kind"] in {KIND_NAME_FIELD, KIND_OBJECT_FIELD}]
-        if any(e.get("translation") for e in name_ents):
-            write_xml(folder / "Name.fieldTranslation-meta.xml",
-                      render_field_file("Name", name_ents))
-
-        fields = sorted({e["key"].split("::", 1)[0] for e in merged_list
-                         if e["kind"] in {KIND_OBJECT_FIELD, KIND_OBJECT_HELP,
-                                          KIND_OBJECT_PICKLIST, KIND_OBJECT_REL}
-                         and e["key"] != "Name"})
-        for field in fields:
-            fents = [e for e in merged_list
-                     if e.get("key") == field
-                     or e.get("key", "").startswith(field + "::")
-                     or e.get("field") == field]
-            if not any(e.get("translation") for e in fents):
-                continue
-            write_xml(folder / f"{field}.fieldTranslation-meta.xml",
-                      render_field_file(field, fents))
-            written += 1
-        print(f"  ✓ {obj}-{args.lang}: {len(fields)} field translation file(s)")
+        patch_ents = [e for e in ents
+                      if package_ids is None or e["id"] in package_ids]
+        parent, fields = patch_translation(org_rec, patch_ents)
+        n = write_translation_dir(root, obj, args.lang, parent, fields)
+        patched = sorted({_field_of(e) for e in patch_ents
+                          if e["kind"] not in {KIND_OBJECT_LABEL, KIND_NAME_FIELD}
+                          and e.get("translation")})
+        print(f"  ✓ {obj}-{args.lang}: {n} field translation file(s), "
+              f"{len(patched)} patched, rest preserved from org")
         written += 1
 
-    print(f"generate_object_translation: wrote under {root}")
+    print(f"generate_object_translation: wrote {written} object translation(s) under {root}")
     return 0
 
 

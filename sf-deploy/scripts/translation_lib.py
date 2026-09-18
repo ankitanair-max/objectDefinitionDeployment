@@ -17,7 +17,6 @@ import hashlib
 import json
 import re
 import subprocess
-import sys
 import unicodedata
 import urllib.error
 import urllib.request
@@ -26,6 +25,25 @@ import xml.sax.saxutils as sx
 from pathlib import Path
 
 NS = "http://soap.sforce.com/2006/04/metadata"
+SCRIPTS_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPTS_DIR.parent
+BUILD_DIR = REPO_ROOT / ".build"
+
+# Used only when `sf org display` does not report an apiVersion.
+FALLBACK_API_VERSION = "60.0"
+
+# Child element order of CustomObjectTranslation / CustomFieldTranslation as
+# declared by the Metadata API WSDL (alphabetical within each type). The
+# elements are a <sequence>, so a deploy rejects out-of-order children.
+COT_CHILD_ORDER = [
+    "caseValues", "fieldSets", "fields", "gender", "layouts", "nameFieldLabel",
+    "quickActions", "recordTypes", "sharingReasons", "standardFields",
+    "startsWith", "validationRules", "webLinks", "workflowTasks",
+]
+CFT_CHILD_ORDER = [
+    "caseValues", "gender", "help", "label", "lookupFilter", "name",
+    "picklistValues", "relationshipLabel", "startsWith",
+]
 
 # Salesforce Translation Workbench language codes (not always ISO 639-1:
 # Salesforce uses `ja` not `ja_JP`, `en_US` not `en`).
@@ -62,6 +80,14 @@ ORG_ONLY = "ORG_ONLY"
 CONFLICT = "CONFLICT"
 SCHEMA_MISSING = "SCHEMA_MISSING"  # target field/value absent in org
 INVALID_LANG = "INVALID_LANG"
+PARSE_ERROR = "PARSE_ERROR"  # unusable sheet cell → validation error, never silent
+
+# Rows carry this flag when their source tab actually has a Field Label (EN)
+# column. Tabs without it are untranslated and are skipped entirely — no
+# catalog entries, no org auth, no Metadata API call.
+EN_FLAG = "_HasFieldLabelEN"
+EN_VALUE_KEYS = ("Field Label (EN)", "Object Label (EN)", "Name Field Label (EN)",
+                 "Help Text (EN)", "Relationship Label (EN)", "Picklist Values (EN)")
 
 WIP_TRUE = {"x", "true", "1", "yes", "○", "〇"}
 DELETE_TRUE = {"true", "1", "yes", "x", "○", "〇"}
@@ -200,12 +226,48 @@ def make_entry(*, kind: str, component: str, aspect: str, key: str,
     return e
 
 
+def translated_tabs(rows: list[dict]) -> set[str]:
+    """Tab names that actually carry a ``Field Label (EN)`` column.
+
+    fetch_sheet.py stamps every row with ``_HasFieldLabelEN``. Older payloads
+    predate the flag, so for those we fall back to "does any EN cell hold a
+    value" rather than assuming the column exists.
+    """
+    tabs: set[str] = set()
+    flagged = False
+    for r in rows:
+        tab = norm(r.get("_SheetName"))
+        if EN_FLAG in r:
+            flagged = True
+            if truthy(r.get(EN_FLAG)):
+                tabs.add(tab)
+    if flagged:
+        return tabs
+    for r in rows:
+        if any(norm(r.get(k)) for k in EN_VALUE_KEYS):
+            tabs.add(norm(r.get("_SheetName")))
+    return tabs
+
+
+def has_translation_columns(rows: list[dict]) -> bool:
+    """True when at least one source tab is translated (see translated_tabs)."""
+    return bool(translated_tabs(rows))
+
+
 def entries_from_object_rows(rows: list[dict], lang: str = DEFAULT_LANG) -> list[dict]:
-    """Convert fetch_sheet.py object/field rows into translation catalog entries."""
+    """Convert fetch_sheet.py object/field rows into translation catalog entries.
+
+    Rows whose source tab has no ``Field Label (EN)`` column produce NO
+    entries: an untranslated tab must not drag the deploy into the translation
+    pipeline (org auth + Metadata API) for nothing.
+    """
+    en_tabs = translated_tabs(rows)
     out: list[dict] = []
     for r in rows:
         obj = norm(r.get("Object API Name"))
         if not obj:
+            continue
+        if norm(r.get("_SheetName")) not in en_tabs:
             continue
         source = f"object_tab:{r.get('_SheetName') or obj}"
         if r.get("_type") == "object_meta":
@@ -279,6 +341,15 @@ def classify(sheet_entries: list[dict], org_by_id: dict[str, dict],
         org = org_by_id.get(eid)
         last = sync_by_id.get(eid) or {}
         rec = dict(e)
+        if e.get("parse_error"):
+            # An unparseable EN cell is a sheet defect, not a missing
+            # translation — surface it as a validation error so it cannot be
+            # mistaken for "Japan has not filled this in yet".
+            rec["code"] = PARSE_ERROR
+            rec["package"] = False
+            rec["reason"] = e["parse_error"]
+            out.append(rec)
+            continue
         if e.get("lang_error"):
             rec["code"] = INVALID_LANG
             rec["package"] = False
@@ -351,31 +422,58 @@ def apply_new_only(classified: list[dict]) -> list[dict]:
     return classified
 
 
-def load_sync_state(path: str | Path = ".build/translation_sync_state.json") -> dict:
-    p = Path(path)
-    if not p.exists():
-        return {"entries": {}}
+DEFAULT_SYNC_STATE = str(BUILD_DIR / "translation_sync_state.json")
+
+
+def _read_sync_file(path: Path) -> dict:
+    if not path.exists():
+        return {}
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
     except Exception:
+        return {}
+
+
+def load_sync_state(path: str | Path = DEFAULT_SYNC_STATE, org_id: str = "") -> dict:
+    """Last-deployed hashes for ONE target org.
+
+    State is keyed by the org's 18-char Id, never by alias: two sandboxes may
+    share an alias across machines, and a hash recorded against sandbox A must
+    never make sandbox B look "unchanged".
+    """
+    data = _read_sync_file(Path(path))
+    key = norm(org_id)
+    if not key:
         return {"entries": {}}
+    return {"entries": ((data.get("orgs") or {}).get(key) or {}).get("entries") or {}}
 
 
 def save_sync_state(entries: list[dict], org: str,
-                    path: str | Path = ".build/translation_sync_state.json") -> None:
+                    path: str | Path = DEFAULT_SYNC_STATE,
+                    org_id: str = "") -> None:
     import datetime
+    key = norm(org_id)
+    if not key:
+        # Without an org Id we cannot attribute the hashes to a sandbox, so we
+        # record nothing rather than poison a shared file.
+        return
     p = Path(path)
-    prev = load_sync_state(p)
-    store = prev.get("entries") or {}
+    data = _read_sync_file(p)
+    orgs = data.get("orgs") or {}
+    bucket = orgs.get(key) or {}
+    store = bucket.get("entries") or {}
     for e in entries:
         if e.get("package") and e.get("code") in {NEW, CHANGED, CONFLICT}:
             store[e["id"]] = {"hash": e.get("hash", ""), "translation": e.get("translation", "")}
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({
+    orgs[key] = {
         "updated": datetime.datetime.now().isoformat(timespec="seconds"),
-        "org": org,
+        "alias": org,
         "entries": store,
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    }
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"orgs": orgs}, ensure_ascii=False, indent=2),
+                 encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- #
@@ -410,13 +508,51 @@ def write_xml(path: Path, root_xml: str) -> None:
 # Org session + Metadata API
 # --------------------------------------------------------------------------- #
 
-def load_token(org: str, token_file: str = ".build/orgauth.json") -> dict:
-    cp = subprocess.run(
-        ["python3", "scripts/get_token.py", "--alias", org, "--out", token_file],
-        text=True, capture_output=True)
-    if cp.returncode != 0:
-        sys.exit(f"❌ get_token failed: {cp.stderr[:400] or cp.stdout[:400]}")
-    return json.loads(Path(token_file).read_text())["result"]
+class MetadataApiError(RuntimeError):
+    """A readMetadata/SOAP call was rejected by the org."""
+
+
+class OrgAuthError(RuntimeError):
+    """`sf org display` could not produce a usable session for the alias."""
+
+
+class TranslationUnavailable(RuntimeError):
+    """Translation Workbench (or the requested language) is not usable in the org."""
+
+
+def org_auth(org: str) -> dict:
+    """Session for `org` via the supported Salesforce CLI, on any machine.
+
+    Uses `sf org display --verbose --json`, so authentication comes from
+    whatever the CLI is already configured with (web login, JWT, auth URL, CI
+    secret). Nothing here reads or decrypts the CLI's keychain files, and
+    nothing assumes a particular HOME layout.
+    """
+    cmd = ["sf", "org", "display", "--target-org", org, "--verbose", "--json"]
+    try:
+        cp = subprocess.run(cmd, text=True, capture_output=True)
+    except FileNotFoundError:
+        raise OrgAuthError("the `sf` CLI is not on PATH — install Salesforce CLI, "
+                           f"then `sf org login web --alias {org}`")
+    try:
+        data = json.loads(cp.stdout or "{}")
+    except json.JSONDecodeError:
+        raise OrgAuthError(f"could not parse `sf org display` output:\n"
+                           f"{(cp.stdout or cp.stderr or '')[:400]}")
+    res = data.get("result") or {}
+    token = norm(res.get("accessToken"))
+    inst = norm(res.get("instanceUrl")).rstrip("/")
+    if cp.returncode != 0 or not token or not inst:
+        msg = norm(data.get("message")) or norm(cp.stderr) or "no accessToken returned"
+        raise OrgAuthError(f"`sf org display --target-org {org}` failed: {msg[:400]}\n"
+                           f"   authorize the org first: sf org login web --alias {org}")
+    return {
+        "accessToken": token,
+        "instanceUrl": inst,
+        "apiVersion": norm(res.get("apiVersion")) or FALLBACK_API_VERSION,
+        "orgId": norm(res.get("id")),
+        "username": norm(res.get("username")),
+    }
 
 
 def read_metadata(mtype: str, full_names: list[str], tok: str, inst: str,
@@ -441,12 +577,58 @@ def read_metadata(mtype: str, full_names: list[str], tok: str, inst: str,
         try:
             xml = urllib.request.urlopen(req, timeout=180).read().decode("utf-8")
         except urllib.error.HTTPError as e:
-            sys.exit(f"❌ readMetadata {mtype} HTTP {e.code}: {e.read().decode()[:400]}")
+            raise MetadataApiError(
+                f"readMetadata {mtype} HTTP {e.code}: {e.read().decode()[:600]}")
         root = ET.fromstring(strip_soap_ns(xml))
+        fault = root.find(".//faultstring")
+        if fault is not None and norm(fault.text):
+            raise MetadataApiError(f"readMetadata {mtype}: {norm(fault.text)[:600]}")
         for rec in root.findall(".//records"):
             if rec.find("fullName") is not None or rec.find("fields") is not None:
                 records.append(rec)
     return records
+
+
+_UNAVAILABLE_HINTS = (
+    "not available for this organization",
+    "not enabled for this organization",
+    "invalid_type",
+    "translation workbench",
+    "invalid language",
+    "language is not",
+)
+
+
+def read_object_translations(objs: list[str], lang: str, auth: dict) -> list[ET.Element]:
+    """readMetadata(CustomObjectTranslation) with a Translation-Workbench preflight.
+
+    Raises TranslationUnavailable (actionable) when the org cannot serve
+    translations for `lang` at all, so the caller can either fail loudly or
+    skip translations explicitly — never emit an opaque SOAP fault.
+    """
+    members = [f"{o}-{lang}" for o in objs if o]
+    if not members:
+        return []
+    try:
+        return read_metadata("CustomObjectTranslation", members,
+                             auth["accessToken"], auth["instanceUrl"],
+                             auth["apiVersion"])
+    except MetadataApiError as e:
+        low = str(e).lower()
+        if any(h in low for h in _UNAVAILABLE_HINTS):
+            raise TranslationUnavailable(
+                f"the org cannot serve CustomObjectTranslation for '{lang}'.\n"
+                f"   org said: {str(e)[:300]}\n"
+                f"   enable Setup → Translation Workbench → Translation Language "
+                f"Settings and activate '{lang}', or run with --on-unavailable skip.")
+        raise
+
+
+def is_base_case_value(cv: ET.Element) -> bool:
+    """The plain singular object label, not a gender/case/possessive variant."""
+    if (cv.findtext("plural") or "").lower() == "true":
+        return False
+    return not any(norm(cv.findtext(t)) for t in ("caseType", "possessive", "article"))
 
 
 def parse_object_translation(rec: ET.Element, obj: str, lang: str) -> dict[str, dict]:
@@ -454,13 +636,20 @@ def parse_object_translation(rec: ET.Element, obj: str, lang: str) -> dict[str, 
     out: dict[str, dict] = {}
     # object label lives in caseValues (singular = plural false)
     for cv in rec.findall("caseValues"):
-        plural = (cv.findtext("plural") or "").lower() == "true"
         val = norm(cv.findtext("value"))
-        if val and not plural:
+        if val and is_base_case_value(cv):
             e = make_entry(kind=KIND_OBJECT_LABEL, component=obj, aspect="label",
                            key=obj, language=lang, master="", translation=val,
                            source="org")
             out[e["id"]] = e
+    # the standard Name field is translated by the PARENT <nameFieldLabel>,
+    # not by a Name.fieldTranslation child.
+    name_label = norm(rec.findtext("nameFieldLabel"))
+    if name_label:
+        e = make_entry(kind=KIND_NAME_FIELD, component=obj, aspect="label",
+                       key="Name", language=lang, master="",
+                       translation=name_label, source="org")
+        out[e["id"]] = e
     for f in rec.findall("fields"):
         name = norm(f.findtext("name"))
         if not name:
@@ -494,3 +683,126 @@ def parse_object_translation(rec: ET.Element, obj: str, lang: str) -> dict[str, 
                            source="org")
             out[e["id"]] = e
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Source-format preservation
+#
+# A CustomObjectTranslation carries far more than field labels: recordTypes,
+# layouts, validationRules, fieldSets, quickActions, webLinks, sharingReasons,
+# workflowTasks, startsWith/gender and the plural/case caseValues variants.
+# The deploy member is the WHOLE object-language pair, so anything we fail to
+# write back is anything we erase. We therefore never rebuild the file from our
+# own reduced model: we keep the org's element tree and patch only the nodes we
+# actually intend to change.
+# --------------------------------------------------------------------------- #
+
+# Metadata-API-only wrappers that must not be written to source format.
+_DROP_PARENT_TAGS = {"fullName"}
+
+
+def _skip(el: ET.Element) -> bool:
+    return el.get("nil") == "true"
+
+
+def element_xml(el: ET.Element, tag: str = "", level: int = 1) -> list[str]:
+    """Serialize a namespace-stripped element as indented source-format lines."""
+    tag = tag or el.tag
+    pad = "    " * level
+    kids = [k for k in list(el) if not _skip(k)]
+    if not kids:
+        text = norm(el.text)
+        return [f"{pad}<{tag}>{esc(text)}</{tag}>"] if text else [f"{pad}<{tag}/>"]
+    lines = [f"{pad}<{tag}>"]
+    for k in kids:
+        lines += element_xml(k, level=level + 1)
+    lines.append(f"{pad}</{tag}>")
+    return lines
+
+
+def render_metadata(root_tag: str, children: list[ET.Element],
+                    order: list[str]) -> str:
+    """Render a metadata file, ordering children per the Metadata API sequence."""
+    rank = {t: i for i, t in enumerate(order)}
+    ordered = sorted(
+        [c for c in children if not _skip(c) and c.tag not in _DROP_PARENT_TAGS],
+        key=lambda c: rank.get(c.tag, len(order)))
+    lines = [f'<{root_tag} xmlns="{NS}">']
+    for c in ordered:
+        lines += element_xml(c)
+    lines += [f"</{root_tag}>", ""]
+    return "\n".join(lines)
+
+
+def split_object_translation(rec: ET.Element | None) -> tuple[list[ET.Element],
+                                                              dict[str, ET.Element]]:
+    """Split an org COT record into (parent children, {fieldName: <fields> element}).
+
+    Source format stores the parent nodes in
+    ``<Obj>-<lang>.objectTranslation-meta.xml`` and each field in its own
+    ``<Field>.fieldTranslation-meta.xml``, so the two halves are split here and
+    both are written back untouched unless explicitly patched.
+    """
+    parent: list[ET.Element] = []
+    fields: dict[str, ET.Element] = {}
+    if rec is None:
+        return parent, fields
+    for child in list(rec):
+        if _skip(child) or child.tag in _DROP_PARENT_TAGS:
+            continue
+        if child.tag == "fields":
+            name = norm(child.findtext("name"))
+            if name:
+                fields[name] = child
+            continue
+        parent.append(child)
+    return parent, fields
+
+
+def set_text(parent: ET.Element, tag: str, value: str) -> None:
+    """Create-or-update a single-valued child element."""
+    el = parent.find(tag)
+    if el is None:
+        el = ET.SubElement(parent, tag)
+    el.attrib.pop("nil", None)
+    el.text = norm(value)
+
+
+def field_element(name: str) -> ET.Element:
+    el = ET.Element("fields")
+    set_text(el, "name", name)
+    return el
+
+
+def set_picklist_translation(field_el: ET.Element, master: str, translation: str) -> None:
+    """Patch one picklistValues pair, leaving every other value untouched."""
+    for pv in field_el.findall("picklistValues"):
+        if norm(pv.findtext("masterLabel")) == norm(master):
+            set_text(pv, "translation", translation)
+            return
+    pv = ET.SubElement(field_el, "picklistValues")
+    set_text(pv, "masterLabel", master)
+    set_text(pv, "translation", translation)
+
+
+def set_object_label(parent: list[ET.Element], label: str) -> list[ET.Element]:
+    """Patch the base singular caseValues; plural/case variants are preserved."""
+    for cv in parent:
+        if cv.tag == "caseValues" and is_base_case_value(cv):
+            set_text(cv, "value", label)
+            return parent
+    cv = ET.Element("caseValues")
+    set_text(cv, "plural", "false")
+    set_text(cv, "value", label)
+    return parent + [cv]
+
+
+def set_parent_text(parent: list[ET.Element], tag: str, value: str) -> list[ET.Element]:
+    for el in parent:
+        if el.tag == tag:
+            el.attrib.pop("nil", None)
+            el.text = norm(value)
+            return parent
+    el = ET.Element(tag)
+    el.text = norm(value)
+    return parent + [el]

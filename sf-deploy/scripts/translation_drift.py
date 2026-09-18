@@ -5,11 +5,19 @@ translation_drift.py — sheet (live catalog) vs org (live Metadata API) transla
 Same role as attr_drift.py, for translations:
   name-existence is not enough — compare the TRANSLATION TEXT (hash) too.
 
+Tabs without a ``Field Label (EN)`` column are untranslated: the delta is empty
+and no org session / Metadata API call is made at all.
+
+Authentication comes from the Salesforce CLI (`sf org display --verbose --json`
+for `--org`), so any authorized machine works; the last-deploy hashes are kept
+per target ORG ID, never per alias.
+
 Usage:
-  python scripts/translation_drift.py --rows temp_updates.json --org ERPDEV01 \
+  python scripts/translation_drift.py --rows temp_updates.json --org <ORG> \
       [--lang en_US] [--new-only] [--out .build/translation_drift.json]
 
-Exit 0 always (report-only) unless --fail-on-conflict.
+Exit codes: 0 ok · 1 sheet defect (unparseable EN cell / invalid language code)
+· 2 conflicts with --fail-on-conflict · 3 translations unavailable in the org.
 """
 from __future__ import annotations
 
@@ -19,32 +27,32 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-sys.path.insert(0, "scripts")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from translation_lib import (  # noqa: E402
-    CHANGED, CONFLICT, DEFAULT_LANG, INVALID_LANG,
+    BUILD_DIR, CHANGED, CONFLICT, DEFAULT_LANG, DEFAULT_SYNC_STATE, INVALID_LANG,
     KIND_OBJECT_FIELD, KIND_OBJECT_HELP, KIND_OBJECT_LABEL, KIND_OBJECT_PICKLIST,
-    KIND_OBJECT_REL, KIND_NAME_FIELD, MISSING, NEW, ORG_ONLY, UNCHANGED,
-    apply_new_only, classify, entries_from_object_rows, load_sync_state,
-    load_token, parse_object_translation, read_metadata,
+    KIND_OBJECT_REL, KIND_NAME_FIELD, MISSING, NEW, ORG_ONLY, PARSE_ERROR,
+    UNCHANGED, OrgAuthError, TranslationUnavailable, apply_new_only, classify,
+    entries_from_object_rows, has_translation_columns, load_sync_state, org_auth,
+    parse_object_translation, read_object_translations,
 )
 
 
-def org_index(entries: list[dict], org: str, lang: str) -> dict[str, dict]:
+def write_delta(out: str, classified: list[dict]) -> None:
+    p = Path(out)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(classified, ensure_ascii=False, indent=2),
+                 encoding="utf-8")
+
+
+def org_index(entries: list[dict], lang: str, auth: dict) -> dict[str, dict]:
     objs = sorted({e["component"] for e in entries
                    if e["kind"] in {KIND_OBJECT_FIELD, KIND_OBJECT_HELP,
                                     KIND_OBJECT_LABEL, KIND_OBJECT_PICKLIST,
                                     KIND_OBJECT_REL, KIND_NAME_FIELD}})
-
-    tokinfo = load_token(org)
-    tok, inst, ver = (tokinfo["accessToken"],
-                      tokinfo["instanceUrl"].rstrip("/"),
-                      tokinfo["apiVersion"])
     idx: dict[str, dict] = {}
-
     if objs:
-        members = [f"{o}-{lang}" for o in objs]
-        recs = read_metadata("CustomObjectTranslation", members, tok, inst, ver)
-        for rec in recs:
+        for rec in read_object_translations(objs, lang, auth):
             fn = (rec.findtext("fullName") or "").strip()
             obj_api = fn.rsplit("-", 1)[0] if fn else ""
             if not obj_api:
@@ -67,9 +75,13 @@ def main() -> int:
     ap.add_argument("--new-only", action="store_true",
                     help="package NEW_TRANSLATION only (future field adds on "
                          "already-translated objects). CHANGED is reported, not packaged.")
-    ap.add_argument("--sync-state", default=".build/translation_sync_state.json")
-    ap.add_argument("--out", default=".build/translation_drift.json")
+    ap.add_argument("--sync-state", default=DEFAULT_SYNC_STATE)
+    ap.add_argument("--out", default=str(BUILD_DIR / "translation_drift.json"))
     ap.add_argument("--fail-on-conflict", action="store_true")
+    ap.add_argument("--on-unavailable", choices=["error", "skip"], default="error",
+                    help="org without Translation Workbench / the language active: "
+                         "fail with an actionable message (default) or report an "
+                         "empty delta so the field deploy continues")
     args = ap.parse_args()
 
     sheet: list[dict] = []
@@ -77,15 +89,34 @@ def main() -> int:
         sheet.extend(json.loads(Path(args.catalog).read_text(encoding="utf-8")))
     if args.rows:
         rows = json.loads(Path(args.rows).read_text(encoding="utf-8"))
-        sheet.extend(entries_from_object_rows(rows, lang=args.lang))
+        if has_translation_columns(rows):
+            sheet.extend(entries_from_object_rows(rows, lang=args.lang))
+        elif not sheet:
+            print("translation_drift: no 'Field Label (EN)' column on the target "
+                  "tab(s) — untranslated, no org call needed.")
+            write_delta(args.out, [])
+            return 0
     if not sheet:
         print("❌ translation_drift: pass --rows temp_updates.json (or --catalog)")
         return 1
     sheet = [e for e in sheet if e.get("language", args.lang) == args.lang]
     print(f"translation_drift  org={args.org}  lang={args.lang}  sheet={len(sheet)}")
 
-    org_by_id = org_index(sheet, args.org, args.lang)
-    sync = load_sync_state(args.sync_state).get("entries") or {}
+    try:
+        auth = org_auth(args.org)
+    except OrgAuthError as e:
+        print(f"❌ {e}")
+        return 1
+    try:
+        org_by_id = org_index(sheet, args.lang, auth)
+    except TranslationUnavailable as e:
+        if args.on_unavailable == "error":
+            print(f"❌ {e}")
+            return 3
+        print(f"⏭  translations skipped — {e}")
+        write_delta(args.out, [])
+        return 0
+    sync = load_sync_state(args.sync_state, org_id=auth.get("orgId", "")).get("entries") or {}
     classified = classify(sheet, org_by_id, sync, conflict_policy=args.conflict)
     if args.new_only:
         classified = apply_new_only(classified)
@@ -100,7 +131,8 @@ def main() -> int:
     print("=" * 88)
     print(f"  NEW={counts[NEW]}  CHANGED={counts[CHANGED]}  UNCHANGED={counts[UNCHANGED]}  "
           f"MISSING={counts[MISSING]}  CONFLICT={counts[CONFLICT]}  "
-          f"ORG_ONLY={counts[ORG_ONLY]}  INVALID_LANG={counts[INVALID_LANG]}")
+          f"ORG_ONLY={counts[ORG_ONLY]}  INVALID_LANG={counts[INVALID_LANG]}  "
+          f"PARSE_ERROR={counts[PARSE_ERROR]}")
     print(f"  packaging {packaged} translation(s)  conflict policy={args.conflict}")
     print("=" * 88)
     for c in classified:
@@ -111,10 +143,13 @@ def main() -> int:
         if c.get("reason"):
             print(f"           {c['reason']}")
 
-    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.out).write_text(json.dumps(classified, ensure_ascii=False, indent=2),
-                              encoding="utf-8")
+    write_delta(args.out, classified)
     print(f"\nsaved → {args.out}")
+    if counts[PARSE_ERROR] or counts[INVALID_LANG]:
+        print(f"⛔ {counts[PARSE_ERROR]} unparseable EN cell(s) and "
+              f"{counts[INVALID_LANG]} invalid language code(s) — fix the sheet; "
+              f"these are validation errors, not missing translations.")
+        return 1
     if args.fail_on_conflict and counts[CONFLICT]:
         return 2
     return 0

@@ -25,13 +25,21 @@ Two phases:
   --phase deploy  (GATED): re-runs build steps (idempotent) then the REAL
                   `deploy start`, live verification, and report refresh.
 
+Object translations ride along automatically (step 4b) for tabs that have a
+`Field Label (EN)` column; tabs without one are untranslated and the step is
+skipped, so a plain field deploy needs no Translation Workbench. `--lang`
+selects the Translation Workbench language (default en_US, `off` to skip).
+
+Authentication is whatever the Salesforce CLI is already authorized with for
+`--org`; `--sf-home` / `--xdg-data-home` are opt-in sandbox overrides.
+
 Usage:
   # safe: prepare + validate + dry-run a batch (no org writes)
-  python scripts/prep_deploy.py --org ERPDEV01 \
+  python scripts/prep_deploy.py --org <ORG> \
       --tabs "諸掛明細: Sales_IncidentalExpensesDetail,単独諸掛:Sales_StandaloneIncidentalExpenses"
 
-  # REAL deploy of the same batch (assistant runs this only after SHOOT)
-  python scripts/prep_deploy.py --org ERPDEV01 --phase deploy \
+  # REAL deploy of the same batch
+  python scripts/prep_deploy.py --org <ORG> --phase deploy \
       --tabs "諸掛明細: Sales_IncidentalExpensesDetail,単独諸掛:Sales_StandaloneIncidentalExpenses"
 """
 from __future__ import annotations
@@ -44,29 +52,46 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from translation_lib import (  # noqa: E402
+    DEFAULT_LANG, has_translation_columns, normalize_lang,
+)
+
 DEFAULT_SHEET_ID = "1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ"
 # Live Data Dictionary: https://docs.google.com/spreadsheets/d/1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ
-OBJECTS_ROOT = Path("force-app/main/default/objects")
-VALIDATION_REPORT = Path(".build/validation_report.json")
-PACKAGE = Path("manifest/package.xml")
-LAST_DEPLOY_LOG = Path(".build/last_deploy.log")
+# Anchored on this file, so the orchestrator behaves the same from any cwd.
+SCRIPTS = Path(__file__).resolve().parent
+ROOT = SCRIPTS.parent
+SOURCE_ROOT = ROOT / "force-app/main/default"
+OBJECTS_ROOT = SOURCE_ROOT / "objects"
+TRANSLATIONS_ROOT = SOURCE_ROOT / "objectTranslations"
+VALIDATION_REPORT = ROOT / ".build/validation_report.json"
+TRANSLATION_DELTA = ROOT / ".build/translation_drift_objects.json"
+PACKAGE = ROOT / "manifest/package.xml"
+LAST_DEPLOY_LOG = ROOT / ".build/last_deploy.log"
 
 
 # --------------------------------------------------------------------------- #
-# env helpers: Google steps need the real HOME (ADC); org steps need the sfhome
-# shim (keychain-linked) so the sf CLI can write its lock/cache files.
+# env helpers. By default org steps inherit the environment, so whatever the
+# Salesforce CLI is already authorized with works — on a laptop, a build agent,
+# or a container. `--sf-home` / `--xdg-data-home` are opt-in overrides for
+# sandboxes that cannot let the CLI write into the real HOME; leaving them
+# unset is the machine-agnostic path.
 # --------------------------------------------------------------------------- #
 def google_env(args) -> dict:
     e = os.environ.copy()
-    e["HOME"] = args.google_home
-    e.pop("XDG_DATA_HOME", None)
+    if args.google_home:
+        e["HOME"] = args.google_home
+        e.pop("XDG_DATA_HOME", None)
     return e
 
 
 def sf_env(args) -> dict:
     e = os.environ.copy()
-    e["HOME"] = args.sf_home
-    e["XDG_DATA_HOME"] = args.xdg_data_home
+    if args.sf_home:
+        e["HOME"] = args.sf_home
+    if args.xdg_data_home:
+        e["XDG_DATA_HOME"] = args.xdg_data_home
     e["SF_DISABLE_LOG_FILE"] = "true"
     e["SFDX_DISABLE_LOG_FILE"] = "true"
     return e
@@ -149,7 +174,7 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str]]:
 
     # 1) fetch all target tabs together (Google creds)
     print("\n[1/6] fetch sheet tabs")
-    run(["python3", "scripts/fetch_sheet.py",
+    run(["python3", str(SCRIPTS / "fetch_sheet.py"),
          "--spreadsheet-id", args.sheet_id, "--tabs", args.tabs,
          "--out", str(temp_path)], google_env(args), capture=True)
 
@@ -165,7 +190,7 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str]]:
     #    Lookup/MasterDetail pointing at an object that doesn't exist in the org,
     #    e.g. the X__c-vs-XMaster__c shorthand; see KB 2026-08-26).
     print("\n[3/6] validate (gate: 0 errors, incl. live referenceTo org check)")
-    run(["python3", "scripts/validate_sheet.py",
+    run(["python3", str(SCRIPTS / "validate_sheet.py"),
          "--in", str(temp_path), "--json", str(VALIDATION_REPORT),
          "--target-org", args.org],
         sf_env(args), capture=True, check=False)
@@ -179,27 +204,41 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str]]:
     print("\n[4/6] generate metadata XML")
     for o in objs:
         shutil.rmtree(OBJECTS_ROOT / o, ignore_errors=True)
-    run(["python3", "scripts/generate_xml.py"], os.environ.copy(), capture=True)
+    run(["python3", str(SCRIPTS / "generate_xml.py")], os.environ.copy(), capture=True)
 
     # 4b) CustomObjectTranslation from Field Label (EN) / Object Label (EN)
     #     on the SAME object tabs — automatic, no extra operator step.
-    print("\n[4b] generate object translations (en_US CustomObjectTranslation)")
-    for o in objs:
-        for p in Path("force-app/main/default/objectTranslations").glob(f"{o}-*"):
-            shutil.rmtree(p, ignore_errors=True)
-    run(["python3", "scripts/translation_drift.py",
-         "--rows", str(temp_path),
-         "--org", args.org, "--lang", "en_US", "--new-only",
-         "--out", ".build/translation_drift_objects.json"],
-        sf_env(args), capture=True)
-    run(["python3", "scripts/generate_object_translation.py",
-         "--rows", str(temp_path), "--org", args.org, "--lang", "en_US",
-         "--delta", ".build/translation_drift_objects.json"],
-        sf_env(args), capture=True)
+    #     Tabs with no `Field Label (EN)` column are untranslated: the whole
+    #     step is skipped so an ordinary field deploy never needs the
+    #     Translation Workbench or a translation org call.
+    if args.lang == "off":
+        print("\n[4b] object translations: disabled (--lang off)")
+    elif not has_translation_columns(json.loads(temp_path.read_text(encoding="utf-8"))):
+        print(f"\n[4b] object translations: skipped — no 'Field Label (EN)' column "
+              f"on {args.tabs}")
+    else:
+        print(f"\n[4b] generate object translations "
+              f"({args.lang} CustomObjectTranslation)")
+        # Only the language we regenerate is rebuilt; translations for other
+        # languages already staged in the tree are left alone.
+        for o in objs:
+            shutil.rmtree(TRANSLATIONS_ROOT / f"{o}-{args.lang}", ignore_errors=True)
+        run(["python3", str(SCRIPTS / "translation_drift.py"),
+             "--rows", str(temp_path),
+             "--org", args.org, "--lang", args.lang, "--new-only",
+             "--on-unavailable", args.on_translation_unavailable,
+             "--out", str(TRANSLATION_DELTA)],
+            sf_env(args), capture=True)
+        run(["python3", str(SCRIPTS / "generate_object_translation.py"),
+             "--rows", str(temp_path), "--org", args.org, "--lang", args.lang,
+             "--on-unavailable", args.on_translation_unavailable,
+             "--delta", str(TRANSLATION_DELTA)],
+            sf_env(args), capture=True)
 
     # 5) build ONE manifest for the whole batch
     print("\n[5/6] build manifest (single package for the batch)")
-    run(["python3", "scripts/build_manifest.py",
+    run(["python3", str(SCRIPTS / "build_manifest.py"),
+         "--source-root", str(SOURCE_ROOT), "--project-root", str(ROOT),
          "--out", str(PACKAGE), "--only", ",".join(objs)],
         os.environ.copy(), capture=True)
 
@@ -212,7 +251,7 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str]]:
         print(f"      {'EXISTS ' if o in present else 'NEW    '} {o}"
               + ("" if o in present else "  (object + fields will be created)"))
 
-    run(["python3", "scripts/deploy.py",
+    run(["python3", str(SCRIPTS / "deploy.py"),
          "--package", str(PACKAGE), "--target-org", args.org,
          "--test-level", args.test_level,
          "--validation-report", str(VALIDATION_REPORT)],
@@ -230,8 +269,8 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str]]:
         if o not in present:
             print(f"      NEW    {o}: skipped (nothing to compare)")
             continue
-        drift_out = f".build/attr_drift_{o}.json"
-        subprocess.run(["python3", "scripts/attr_drift.py", "--object", o,
+        drift_out = str(ROOT / f".build/attr_drift_{o}.json")
+        subprocess.run(["python3", str(SCRIPTS / "attr_drift.py"), "--object", o,
                         "--rows", str(temp_path), "--org", args.org, "--out", drift_out],
                        env=google_env(args), text=True)
         try:
@@ -259,7 +298,7 @@ def deploy_phase(args, temp_path: Path, objs: list[str], tab_of: dict[str, str])
 
     # REAL deploy of the single batch package
     print("\n[1/3] real deploy (sf project deploy start)")
-    run(["python3", "scripts/deploy.py", "--start",
+    run(["python3", str(SCRIPTS / "deploy.py"), "--start",
          "--package", str(PACKAGE), "--target-org", args.org,
          "--test-level", args.test_level,
          "--validation-report", str(VALIDATION_REPORT)],
@@ -272,7 +311,7 @@ def deploy_phase(args, temp_path: Path, objs: list[str], tab_of: dict[str, str])
     # MANDATORY live verification (Tooling API, FLS-independent)
     print("\n[2/3] live verification (verify_deploy.py, Tooling API)")
     cp = subprocess.run(
-        ["python3", "scripts/verify_deploy.py", "--target-org", args.org,
+        ["python3", str(SCRIPTS / "verify_deploy.py"), "--target-org", args.org,
          "--objects", ",".join(objs)],
         env=sf_env(args), text=True)
     if cp.returncode != 0:
@@ -284,12 +323,15 @@ def deploy_phase(args, temp_path: Path, objs: list[str], tab_of: dict[str, str])
     for o in objs:
         tab = tab_of.get(o, "")
         fields_dir = OBJECTS_ROOT / o / "fields"
-        cmd = ["python3", "scripts/build_object_report.py",
+        cmd = ["python3", str(SCRIPTS / "build_object_report.py"),
                "--object-api", o, "--sheet-tab", tab,
                "--sheet-id", args.sheet_id, "--target-org", args.org,
                "--fields-dir", str(fields_dir),
-               "--sf-home", args.sf_home, "--xdg-data-home", args.xdg_data_home,
                "--workbook", args.workbook]
+        if args.sf_home:
+            cmd += ["--sf-home", args.sf_home]
+        if args.xdg_data_home:
+            cmd += ["--xdg-data-home", args.xdg_data_home]
         rc = subprocess.run(cmd, env=google_env(args), text=True).returncode
         if rc != 0:
             print(f"      ⚠️  report refresh failed for {o} (deploy still verified).")
@@ -307,12 +349,32 @@ def main() -> int:
     ap.add_argument("--phase", choices=["build", "deploy"], default="build")
     ap.add_argument("--test-level", default="NoTestRun")
     ap.add_argument("--sheet-id", default=DEFAULT_SHEET_ID)
-    ap.add_argument("--out", default="temp_updates.json")
+    ap.add_argument("--out", default=str(ROOT / "temp_updates.json"))
     ap.add_argument("--workbook", default="reports/Object_Deployment_Report.xlsx")
-    ap.add_argument("--google-home", default=os.environ.get("SEAP_GOOGLE_HOME", str(Path.home())))
-    ap.add_argument("--sf-home", default=str(Path(".sfhome").resolve()))
-    ap.add_argument("--xdg-data-home", default=str(Path.home() / ".local" / "share"))
+    ap.add_argument("--lang", default=DEFAULT_LANG,
+                    help="Translation Workbench language for the object "
+                         "translations generated in step 4b (default en_US; "
+                         "pass 'off' to skip translations entirely)")
+    ap.add_argument("--on-translation-unavailable", choices=["error", "skip"],
+                    default="error",
+                    help="org without Translation Workbench / --lang active: "
+                         "fail with an actionable message (default), or skip "
+                         "translations and deploy the fields only")
+    ap.add_argument("--google-home", default=os.environ.get("SEAP_GOOGLE_HOME", ""),
+                    help="override HOME for the Google (ADC) steps; default: inherit")
+    ap.add_argument("--sf-home", default=os.environ.get("SEAP_SF_HOME", ""),
+                    help="override HOME for the sf CLI steps; default: inherit, "
+                         "i.e. use however this machine authorized the CLI")
+    ap.add_argument("--xdg-data-home", default=os.environ.get("SEAP_XDG_DATA_HOME", ""),
+                    help="override XDG_DATA_HOME for the sf CLI steps; default: inherit")
     args = ap.parse_args()
+
+    if args.lang != "off":
+        lang, lang_err = normalize_lang(args.lang)
+        if lang_err:
+            raise SystemExit(f"❌ --lang: {lang_err} — use a Salesforce Translation "
+                             f"Workbench code such as en_US, ja, zh_CN, or 'off'.")
+        args.lang = lang
 
     temp_path = Path(args.out)
 

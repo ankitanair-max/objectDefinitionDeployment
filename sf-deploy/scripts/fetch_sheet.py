@@ -31,8 +31,12 @@ import json
 import os
 import sys
 import warnings
+from pathlib import Path
 
 warnings.filterwarnings("ignore")
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from translation_lib import EN_FLAG  # noqa: E402  (stdlib-only module)
 
 # --------------------------------------------------------------------------- #
 # Column mapping: Row-12 API header (case-insensitive)  ->  temp_updates.json key
@@ -328,6 +332,10 @@ def parse_tab(title: str, grid: list[list], object_api_hint: str = "") -> list[d
     # Object-level English is row 1 of the Field Label (EN) column.
     # Locate by header via col_map.
     en_cols = [i for i, k in col_map.items() if k == "Field Label (EN)"]
+    # Whether this tab is translated AT ALL. Downstream (translation_drift /
+    # generate_object_translation) skips untranslated tabs entirely, so an
+    # ordinary field deploy never acquires a translation dependency.
+    has_en = bool(en_cols)
     if en_cols and grid:
         c = en_cols[0]
         row1 = grid[0] if grid else []
@@ -357,7 +365,8 @@ def parse_tab(title: str, grid: list[list], object_api_hint: str = "") -> list[d
         # gray-guard line (col C). Shared helper so the boundary never drifts.
         if is_field_list_end(cells):
             break
-        rec = {"_SheetName": title, "Object API Name": obj_api, "Object Label": obj_label}
+        rec = {"_SheetName": title, "Object API Name": obj_api,
+               "Object Label": obj_label, EN_FLAG: has_en}
         for idx, key in col_map.items():
             rec[key] = cells[idx] if idx < len(cells) else ""
         # capture page-layout Tab (Z) + section (AA) for downstream page work
@@ -388,6 +397,8 @@ def parse_tab(title: str, grid: list[list], object_api_hint: str = "") -> list[d
         field_rows.append(rec)
 
     obj_meta.update(name_field)
+    obj_meta[EN_FLAG] = has_en
+    obj_meta.setdefault("_SheetName", title)
     if obj_api:
         rows.append(obj_meta)
     else:
