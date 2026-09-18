@@ -477,7 +477,7 @@ def print_log(rep: Report, total_rows: int) -> None:
     print("=" * 72)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Validate DD rows before packaging")
     ap.add_argument("--in", dest="inp", default="temp_updates.json")
     ap.add_argument("--json", dest="json_out", default="")
@@ -486,7 +486,7 @@ def main() -> int:
                     help="if set, live-verify every Lookup/MasterDetail referenceTo "
                          "custom object EXISTS in this org (ERROR on missing, with a "
                          "'…Master__c?' hint). Offline when omitted.")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     try:
         rows = json.load(open(args.inp, encoding="utf-8"))

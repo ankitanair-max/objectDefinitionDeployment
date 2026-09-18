@@ -9,7 +9,7 @@ Mirrors the object-definition pipeline:
   * Delta is key-based + content-hash; unchanged translations are not redeployed.
   * Conflicts (sheet AND org both drifted from last successful deploy) are parked.
 
-This module has no CLI. Import from translation_drift / generate_object_translation.
+This module has no CLI. Import it from plan_deploy / generate_object_translation.
 """
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ KIND_OBJECT_HELP = "ObjectHelp"
 KIND_OBJECT_REL = "ObjectRelationshipLabel"
 KIND_OBJECT_PICKLIST = "ObjectPicklist"
 
-# Codes used by translation_drift / generators.
+# Codes used by the planner / generators.
 NEW = "NEW_TRANSLATION"
 CHANGED = "CHANGED"
 UNCHANGED = "UNCHANGED"

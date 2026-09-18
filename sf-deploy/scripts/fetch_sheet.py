@@ -332,7 +332,7 @@ def parse_tab(title: str, grid: list[list], object_api_hint: str = "") -> list[d
     # Object-level English is row 1 of the Field Label (EN) column.
     # Locate by header via col_map.
     en_cols = [i for i, k in col_map.items() if k == "Field Label (EN)"]
-    # Whether this tab is translated AT ALL. Downstream (translation_drift /
+    # Whether this tab is translated AT ALL. Downstream (plan_deploy /
     # generate_object_translation) skips untranslated tabs entirely, so an
     # ordinary field deploy never acquires a translation dependency.
     has_en = bool(en_cols)

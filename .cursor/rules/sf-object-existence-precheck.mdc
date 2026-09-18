@@ -10,15 +10,15 @@ first determine whether that object already exists in the org, and act
 accordingly. This applies to a single object AND to any command that touches
 multiple objects — run the check PER object, every time. No exceptions.
 
-## Preferred entry point — `prep_deploy.py` (batch orchestrator)
+## Preferred entry point — `deploy.py` (batch orchestrator)
 
 For single-object OR multi-object deploys, prefer the one-command orchestrator
-`scripts/prep_deploy.py`, which performs this entire flow with all gates and
+`scripts/deploy.py`, which performs this entire flow with all gates and
 batches every target object into ONE validated package + ONE deploy:
 
 ```
 # safe: prepare + validate + existence pre-check + check-only dry-run (no writes)
-python scripts/prep_deploy.py --org "<ORG>" --tabs "<tab1>,<tab2>,..."
+python scripts/deploy.py --org "<ORG>" --tabs "<tab1>,<tab2>,..."
 
 
 

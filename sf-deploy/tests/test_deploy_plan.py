@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Self-test: the delta-driven deployment plan, staged generation and manifest.
 
-Run from anywhere:  python3 scripts/test_deploy_plan.py
+Run from anywhere:  python3 -m pytest sf-deploy/tests
 No org, no sheet, no Salesforce CLI — the target-org snapshot is a fixture, so
 these tests prove the pipeline's decisions, not one machine's org state.
 
@@ -21,7 +21,7 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-SCRIPTS = Path(__file__).resolve().parent
+SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import plan_deploy  # noqa: E402
@@ -371,7 +371,7 @@ def test_bare_generation_is_refused():
 def test_validation_report_is_written_on_a_fresh_clone():
     """validate_sheet.py must create its report directory, and a missing report
     must read as "gate not evaluated", never as an error COUNT."""
-    import prep_deploy
+    import deploy as deploy_cmd
 
     rows = [meta_row(), field_row("TI_Fnt_Qty__c", "数量", "Quantity")]
     with tempfile.TemporaryDirectory() as tmp:
@@ -388,25 +388,25 @@ def test_validation_report_is_written_on_a_fresh_clone():
         assert report.exists(), "the report directory must be created"
         assert json.loads(report.read_text())["counts"]["ERROR"] == 0
 
-        real = prep_deploy.VALIDATION_REPORT
+        real = deploy_cmd.VALIDATION_REPORT
         try:
-            prep_deploy.VALIDATION_REPORT = tmp / "absent.json"
+            deploy_cmd.VALIDATION_REPORT = tmp / "absent.json"
             try:
-                prep_deploy.validation_error_count()
+                deploy_cmd.validation_error_count()
                 raise AssertionError("a missing report must stop the build")
-            except SystemExit as e:
+            except deploy_cmd.DeployError as e:
                 assert "could not be evaluated" in str(e), e
 
             bad = tmp / "bad.json"
             bad.write_text("{not json", encoding="utf-8")
-            prep_deploy.VALIDATION_REPORT = bad
+            deploy_cmd.VALIDATION_REPORT = bad
             try:
-                prep_deploy.validation_error_count()
+                deploy_cmd.validation_error_count()
                 raise AssertionError("an unreadable report must stop the build")
-            except SystemExit as e:
+            except deploy_cmd.DeployError as e:
                 assert "unreadable" in str(e), e
         finally:
-            prep_deploy.VALIDATION_REPORT = real
+            deploy_cmd.VALIDATION_REPORT = real
     print("  ok  validation-report-is-written-on-a-fresh-clone")
 
 
@@ -548,19 +548,41 @@ def test_generation_is_linear_in_entries():
 # one canonical entry point
 # --------------------------------------------------------------------------- #
 
-def test_single_canonical_entry_point():
-    prep = (SCRIPTS / "prep_deploy.py").read_text(encoding="utf-8")
-    for step in ("org_snapshot.py", "plan_deploy.py", "generate_xml.py",
-                 "generate_object_translation.py", "build_manifest.py",
-                 "deploy.py", "verify_deploy.py"):
-        assert step in prep, f"the canonical entry point must run {step}"
-    assert "--plan" in prep and "--snapshot" in prep
-    assert "CANONICAL DEPLOY ENTRY POINT" in prep
+def test_deploy_is_the_public_entry_point():
+    """`deploy.py` owns the pipeline and IMPORTS its stages as modules."""
+    import deploy
 
-    run = (SCRIPTS / "run.py").read_text(encoding="utf-8")
-    assert "prep_deploy.py" in run, "run.py must delegate, not fork the pipeline"
-    assert "generate_xml.py" not in run and "build_manifest.py" not in run
-    print("  ok  single-canonical-entry-point")
+    for mod in (deploy.org_snapshot, deploy.plan_deploy, deploy.generate_xml,
+                deploy.generate_object_translation, deploy.build_manifest,
+                deploy.verify_deploy, deploy.sf_deployer, deploy.build_destructive):
+        assert callable(mod.main), f"{mod.__name__} must be importable as a stage"
+
+    # the three modes exist on the one command
+    for flag in ("--plan", "--check-only", "--start", "--deletes",
+                 "--include-drift", "--max-components"):
+        assert flag in _help(deploy), flag
+
+    # the folded scripts are gone
+    for gone in ("run.py", "translation_drift.py", "get_token.py"):
+        assert not (SCRIPTS / gone).exists(), f"{gone} should have been removed"
+
+    # prep_deploy is a shim that forwards, not a second pipeline
+    prep = (SCRIPTS / "prep_deploy.py").read_text(encoding="utf-8")
+    assert "DEPRECATED" in prep and "deploy.main" in prep
+    assert "build_manifest" not in prep and "org_snapshot" not in prep
+    import prep_deploy
+    assert prep_deploy.translate(["--org", "X", "--phase", "deploy"]) == \
+        ["--org", "X", "--start"]
+    assert prep_deploy.translate(["--org", "X", "--phase", "build"]) == ["--org", "X"]
+
+
+def _help(module) -> str:
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.suppress(SystemExit):
+        module.main(["--help"])
+    return buf.getvalue()
 
 
 def test_libraries_raise_instead_of_exiting():
@@ -625,43 +647,3 @@ def test_namespace_aware_parsing_keeps_text_intact():
     assert label is not None
     assert label.text == 'a < b xmlns="trap" <met:trap>', label.text
     print("  ok  namespace-aware-parsing-keeps-text-intact")
-
-
-def main() -> int:
-    print("test_deploy_plan")
-    for fn in (
-        test_new_object_packages_object_fields_and_translations,
-        test_existing_object_one_new_field,
-        test_second_run_is_an_empty_delta,
-        test_existing_field_missing_en_is_reported_not_packaged,
-        test_changed_en_is_reported_not_packaged,
-        test_wip_and_isdelete_are_separated,
-        test_standard_fields_are_never_custom_field_members,
-        test_attribute_drift_needs_an_explicit_decision,
-        test_translation_for_unknown_field_is_schema_missing,
-        test_untranslated_tab_plans_fields_only,
-        test_workbench_unavailable_still_plans_fields,
-        test_multiple_sandboxes_are_independent,
-        test_plan_carries_immutable_org_id_and_scope,
-        test_multiple_languages_plan_separate_members,
-        test_staged_generation_honours_custom_input_and_plan,
-        test_bare_generation_is_refused,
-        test_validation_report_is_written_on_a_fresh_clone,
-        test_manifest_contains_only_planned_members,
-        test_empty_plan_yields_empty_manifest,
-        test_package_split_is_deterministic_and_grouped,
-        test_performance_100_objects_200_fields,
-        test_generation_is_linear_in_entries,
-        test_single_canonical_entry_point,
-        test_libraries_raise_instead_of_exiting,
-        test_soql_inputs_are_validated,
-        test_partial_metadata_response_is_an_error,
-        test_namespace_aware_parsing_keeps_text_intact,
-    ):
-        fn()
-    print("ALL PASSED")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

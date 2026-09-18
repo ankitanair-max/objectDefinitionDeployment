@@ -32,6 +32,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import attr_drift  # noqa: E402
+import build_manifest  # noqa: E402
 import org_snapshot  # noqa: E402
 from translation_lib import (  # noqa: E402
     BUILD_DIR, CONFLICT, DEFAULT_LANG, DEFAULT_SYNC_STATE, INVALID_LANG, NEW,
@@ -41,10 +43,6 @@ from translation_lib import (  # noqa: E402
 )
 
 DEFAULT_OUT = BUILD_DIR / "deploy_plan.json"
-
-
-class DriftReportError(RuntimeError):
-    """An attribute-drift report exists but cannot be read."""
 
 
 # Standard fields cannot be deployed as CustomField metadata.
@@ -97,22 +95,53 @@ def sheet_scope(rows: list[dict]) -> dict:
     return scope
 
 
-def load_drift(objs: list[str], drift_dir: Path) -> dict[str, list[dict]]:
-    """Read attr_drift.py output per object (already produced by the caller)."""
+def compute_drift(rows: list[dict], snapshot: dict) -> dict[str, list[dict]]:
+    """Attribute drift for every EXISTING object — computed LOCALLY.
+
+    The CustomObject metadata already came down with the bulk snapshot, so no
+    object costs an extra authentication or Metadata API call here. Each entry
+    carries its `component`, because the standard Name field is part of the
+    CustomObject and must never be packaged as a CustomField member.
+    """
     out: dict[str, list[dict]] = {}
-    for o in objs:
-        p = drift_dir / f"attr_drift_{o}.json"
-        if not p.exists():
+    for obj in sorted((snapshot.get("objects") or {})):
+        rec = org_snapshot.object_record(snapshot, obj)
+        if rec is None:
+            continue                      # new object: nothing to drift against
+        org = attr_drift.parse_org_object(rec)
+        if not org:
             continue
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except Exception as e:
-            raise DriftReportError(
-                f"unreadable drift report {p}: {e} — a drift check that cannot "
-                f"be read is NOT a clean one") from e
-        if data:
-            out[o] = data
+        drift, _insync, warnings = attr_drift.compute_drift(obj, rows, org)
+        for w in warnings:
+            print(f"⚠️  {obj}: {w}")
+        # "not in org yet" is the NEW-field delta, not drift — reporting it as
+        # drift would double-count every field the plan is already creating.
+        drift = [d for d in drift if d.get("org") != "(absent)"]
+        if drift:
+            out[obj] = drift
     return out
+
+
+# A new field can force a change on the OBJECT itself. Packaging only the field
+# then fails (or silently under-deploys), so the plan has to carry the object.
+def object_update_reasons(obj: str, new_fields: list[str], rows: list[dict],
+                          snapshot: dict) -> list[str]:
+    rec = org_snapshot.object_record(snapshot, obj)
+    org_obj = attr_drift.parse_org_object(rec) or {}
+    meta = org_obj.get("__object__") or {}
+    planned = set(new_fields)
+    reasons: list[str] = []
+    rows_for = [r for r in rows
+                if norm(r.get("Object API Name")) == obj
+                and norm(r.get("Field API Name")) in planned]
+    if any(truthy(r.get("Track History")) for r in rows_for) and \
+            norm(meta.get("enableHistory")).lower() != "true":
+        reasons.append("a new field tracks history; the object needs enableHistory=true")
+    if any("masterdetail" in norm(r.get("Data Type")).lower().replace("-", "").replace(" ", "")
+           or norm(r.get("Data Type")) in ("主従関係",) for r in rows_for) and \
+            norm(meta.get("sharingModel")) != "ControlledByParent":
+        reasons.append("a new Master-Detail field forces sharingModel=ControlledByParent")
+    return reasons
 
 
 def build_plan(rows: list[dict], snapshot: dict, *, sheet_id: str, tabs: str,
@@ -120,7 +149,8 @@ def build_plan(rows: list[dict], snapshot: dict, *, sheet_id: str, tabs: str,
                include_drift: set[str] | None = None,
                drift: dict[str, list[dict]] | None = None,
                sync_state: str | Path = DEFAULT_SYNC_STATE,
-               conflict_policy: str = "park") -> dict:
+               conflict_policy: str = "park",
+               max_components: int = 9000) -> dict:
     include_drift = include_drift or set()
     drift = drift or {}
     scope = sheet_scope(rows)
@@ -129,6 +159,7 @@ def build_plan(rows: list[dict], snapshot: dict, *, sheet_id: str, tabs: str,
               for o, v in (snapshot.get("objects") or {}).items()}
 
     objects: list[dict] = []
+    object_updates: dict[str, list[str]] = {}
     new_objects: list[str] = []
     new_fields: dict[str, list[str]] = {}
     skipped_fields: dict[str, list[str]] = {}
@@ -143,13 +174,26 @@ def build_plan(rows: list[dict], snapshot: dict, *, sheet_id: str, tabs: str,
         present = [f for f in b["sheetFields"] if f in have]
         drifted = [d for d in drift.get(obj, [])]
         # a drifted field is only packaged when the operator explicitly opts in
-        redeploy = sorted({f"{obj}.{norm(d.get('field'))}" for d in drifted
-                           if f"{obj}.{norm(d.get('field'))}" in include_drift})
+        approved = [d for d in drifted
+                    if f"{obj}.{norm(d.get('field'))}" in include_drift]
+        redeploy = sorted({f"{obj}.{norm(d.get('field'))}" for d in approved})
+        # classify by COMPONENT: the standard Name field is defined inside the
+        # CustomObject, so `Obj__c.Name` is not a deployable CustomField member.
+        drift_fields = sorted({norm(d.get("field")) for d in approved
+                               if d.get("component", "CustomField") == "CustomField"})
+        if any(d.get("component") == "CustomObject" for d in approved):
+            object_updates.setdefault(obj, []).append(
+                "approved drift on the standard Name field (CustomObject metadata)")
 
         if not in_org:
             new_objects.append(obj)
         if absent:
             new_fields[obj] = sorted(absent)
+        if drift_fields:
+            new_fields[obj] = sorted(set(new_fields.get(obj, [])) | set(drift_fields))
+        if in_org:
+            for why in object_update_reasons(obj, new_fields.get(obj, []), rows, snapshot):
+                object_updates.setdefault(obj, []).append(why)
         if present:
             skipped_fields[obj] = sorted(present)
         delete_members += [f"{obj}.{f}" for f in sorted(b["delete"])]
@@ -167,16 +211,10 @@ def build_plan(rows: list[dict], snapshot: dict, *, sheet_id: str, tabs: str,
             "deleteRequested": sorted(b["delete"]),
             "attributeDrift": drifted,
             "driftApproved": redeploy,
+            "objectUpdate": object_updates.get(obj, []),
         })
 
     planned = {o: set(f) for o, f in new_fields.items()}
-    for member in include_drift:
-        if "." in member:
-            o, f = member.split(".", 1)
-            planned.setdefault(o, set()).add(f)
-            new_fields.setdefault(o, [])
-            if f not in new_fields[o]:
-                new_fields[o] = sorted(new_fields[o] + [f])
 
     # ---- translations ---------------------------------------------------- #
     translations: list[dict] = []
@@ -202,7 +240,7 @@ def build_plan(rows: list[dict], snapshot: dict, *, sheet_id: str, tabs: str,
 
     # ---- manifest members ------------------------------------------------ #
     members: dict[str, list[str]] = {
-        "CustomObject": sorted(new_objects),
+        "CustomObject": sorted(set(new_objects) | set(object_updates)),
         "CustomField": sorted(f"{o}.{f}" for o, fs in new_fields.items() for f in fs),
         "CustomObjectTranslation": sorted({
             f"{t['component']}-{lang}" for t in translations if t.get("package")}),
@@ -220,6 +258,7 @@ def build_plan(rows: list[dict], snapshot: dict, *, sheet_id: str, tabs: str,
         "newOnly": new_only,
         "objects": objects,
         "newObjects": sorted(new_objects),
+        "objectUpdates": {o: v for o, v in sorted(object_updates.items())},
         "newFields": {o: sorted(f) for o, f in sorted(new_fields.items()) if f},
         "skippedFields": {o: f for o, f in sorted(skipped_fields.items())},
         "attributeDrift": {o: drift[o] for o in sorted(drift)},
@@ -228,6 +267,7 @@ def build_plan(rows: list[dict], snapshot: dict, *, sheet_id: str, tabs: str,
         "translationPackage": [t["id"] for t in translations if t.get("package")],
         "deleteMembers": sorted(delete_members),
         "manifestMembers": members,
+        "manifestParts": build_manifest.plan_parts(members, max_components),
         "validationErrors": [{"id": e["id"], "code": e["code"],
                               "reason": e.get("reason", "")} for e in errors],
     }
@@ -243,6 +283,8 @@ def build_plan(rows: list[dict], snapshot: dict, *, sheet_id: str, tabs: str,
         "conflicts": sum(1 for t in translations if t.get("code") == CONFLICT),
         "deletes": len(delete_members),
         "components": sum(len(v) for v in members.values()),
+        "packages": len(build_manifest.plan_parts(members, max_components)),
+        "objectUpdates": len(object_updates),
         "empty": not members,
     }
     return plan
@@ -261,9 +303,12 @@ def report(plan: dict) -> None:
               f"org={o['orgFieldCount']} → new={len(o['newFields'])} "
               f"skipped={len(o['existingFields'])} drift={len(o['attributeDrift'])} "
               f"wip={len(o['wipSkipped'])} delete={len(o['deleteRequested'])}")
+        for why in o.get("objectUpdate", []):
+            print(f"         object-update  {why}")
         for d in o["attributeDrift"]:
             mark = "APPROVED" if f"{o['object']}.{d.get('field')}" in plan["driftApproved"] else "REPORT  "
-            print(f"         drift[{mark}] {d.get('field')}: {d.get('reason', '')[:90]}")
+            print(f"         drift[{mark}] {d.get('component', 'CustomField')} "
+                  f"{d.get('field')}: {d.get('reason', '')[:70]}")
     print("-" * 78)
     print(f"  new objects {s['newObjects']} · new fields {s['newFields']} · "
           f"skipped {s['skippedFields']} · drift {s['driftedFields']} "
@@ -272,12 +317,18 @@ def report(plan: dict) -> None:
           f"schema-missing {s['schemaMissingTranslations']} · deletes {s['deletes']}")
     for mtype, vals in plan["manifestMembers"].items():
         print(f"  manifest {mtype:26} {len(vals)}")
+    parts = plan.get("manifestParts") or []
+    if len(parts) > 1:
+        print(f"  → {s['components']} components split into {len(parts)} packages; "
+              f"all of them are deployed, in order:")
+        for part in parts:
+            print(f"      {part['file']:26} {part['components']} component(s)")
     if s["empty"]:
         print("  → nothing to deploy: the org already matches the sheet.")
     print("=" * 78)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Compute the deployment plan (delta)")
     ap.add_argument("--rows", required=True)
     ap.add_argument("--snapshot", default=str(org_snapshot.DEFAULT_OUT))
@@ -290,25 +341,21 @@ def main() -> int:
     ap.add_argument("--include-drift", default="",
                     help="comma-separated Obj__c.Field__c to redeploy despite "
                          "attribute drift (explicit decision, never automatic)")
-    ap.add_argument("--drift-dir", default=str(BUILD_DIR))
+    ap.add_argument("--max-components", type=int, default=9000,
+                    help="component cap per package; larger plans split into "
+                         "package.partN.xml and every part is deployed")
     ap.add_argument("--sync-state", default=DEFAULT_SYNC_STATE)
     ap.add_argument("--out", default=str(DEFAULT_OUT))
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     rows = json.loads(Path(args.rows).read_text(encoding="utf-8"))
     snapshot = org_snapshot.load(args.snapshot)
-    objs = sorted({norm(r.get("Object API Name")) for r in rows
-                   if norm(r.get("Object API Name"))})
-    try:
-        plan = build_plan(
-            rows, snapshot, sheet_id=args.sheet_id, tabs=args.tabs, lang=args.lang,
-            new_only=args.new_only,
-            include_drift={m.strip() for m in args.include_drift.split(",") if m.strip()},
-            drift=load_drift(objs, Path(args.drift_dir)),
-            sync_state=args.sync_state)
-    except DriftReportError as e:
-        print(f"⛔ {e}")
-        return 1
+    plan = build_plan(
+        rows, snapshot, sheet_id=args.sheet_id, tabs=args.tabs, lang=args.lang,
+        new_only=args.new_only,
+        include_drift={m.strip() for m in args.include_drift.split(",") if m.strip()},
+        drift=compute_drift(rows, snapshot),
+        sync_state=args.sync_state, max_components=args.max_components)
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

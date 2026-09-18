@@ -207,7 +207,26 @@ def split_members(members: dict[str, list[str]], max_components: int
             for p in packages]
 
 
-def main() -> int:
+def plan_parts(members: dict[str, list[str]], max_components: int,
+               stem: str = "package", suffix: str = ".xml") -> list[dict]:
+    """The manifest INDEX: every package file this member set becomes.
+
+    The planner stores this in the plan so the deploy command knows there are
+    N packages and deploys every one of them in order. Deploying only
+    `package.xml` when the plan split into parts silently drops components.
+    """
+    packages = split_members(members, max_components)
+    if not packages:
+        return []
+    if len(packages) == 1:
+        return [{"file": f"{stem}{suffix}", "members": packages[0],
+                 "components": sum(len(v) for v in packages[0].values())}]
+    return [{"file": f"{stem}.part{i}{suffix}", "members": part,
+             "components": sum(len(v) for v in part.values())}
+            for i, part in enumerate(packages, 1)]
+
+
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Build package.xml / destructiveChanges.xml")
     ap.add_argument("--plan", default="",
                     help="deploy_plan.json — take the members from the PLAN "
@@ -222,16 +241,20 @@ def main() -> int:
     ap.add_argument("--destroy", default="", help="deletions.json path")
     ap.add_argument("--destroy-out", default="manifest/destructiveChanges.xml")
     ap.add_argument("--project-root", default=".")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     proj_root = Path(args.project_root)
     api_version = args.api_version or default_api_version(proj_root)
     source_root = Path(args.source_root)
     only = {o.strip() for o in args.only.split(",") if o.strip()} or None
 
+    parts: list[dict] | None = None
     if args.plan:
         plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
         members = {k: sorted(v) for k, v in (plan.get("manifestMembers") or {}).items()}
+        # The plan already decided how the members split; honour that index
+        # verbatim so the files on disk match what the deploy will iterate.
+        parts = plan.get("manifestParts") or None
         source = f"plan {args.plan}"
     else:
         if not source_root.is_dir():
@@ -244,18 +267,22 @@ def main() -> int:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    packages = split_members(members, args.max_components)
-    if len(packages) <= 1:
-        out.write_text(render_package(members, api_version), encoding="utf-8")
+    if parts is None:
+        parts = plan_parts(members, args.max_components, out.stem, out.suffix)
+    written = []
+    for part in parts:
+        p = out.with_name(Path(part["file"]).name)
+        p.write_text(render_package(part["members"], api_version), encoding="utf-8")
+        written.append(p)
+    if not parts:                       # empty delta: still emit a valid manifest
+        out.write_text(render_package({}, api_version), encoding="utf-8")
         written = [out]
-    else:
-        written = []
-        for i, part in enumerate(packages, 1):
-            p = out.with_name(f"{out.stem}.part{i}{out.suffix}")
-            p.write_text(render_package(part, api_version), encoding="utf-8")
-            written.append(p)
-        # keep --out valid as the first part so callers never deploy a stale file
-        out.write_text(render_package(packages[0], api_version), encoding="utf-8")
+    # Stale parts from a previous, larger run would otherwise be deployed again.
+    keep = {p.name for p in written}
+    for old in out.parent.glob(f"{out.stem}.part*{out.suffix}"):
+        if old.name not in keep:
+            old.unlink()
+    packages = [p["members"] for p in parts]
 
     print(f"📦 package.xml  ->  {', '.join(str(p) for p in written)}   "
           f"(api {api_version}, from {source})")

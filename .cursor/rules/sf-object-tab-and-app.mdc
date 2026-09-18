@@ -24,7 +24,7 @@ control in its object-meta header block:
   creation for that object (deploy the object/fields only, no tab).
 
 Read `H6` **live** from the object's sheet tab (per the read-sheet-live rule)
-before deciding. `fetch_sheet.py` / `prep_deploy.py` surface this value; if it is
+before deciding. `fetch_sheet.py` / `deploy.py` surface this value; if it is
 missing, treat blank as `FALSE` (do not create a tab) and surface that to the user.
 
 ## Step 1 — Create a CustomTab ONLY when H6 = TRUE

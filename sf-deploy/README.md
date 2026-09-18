@@ -7,20 +7,24 @@ here.
 ```
 sf-deploy/
 ├── scripts/
-│   ├── prep_deploy.py      ★ THE canonical entry point (whole pipeline)
+│   ├── deploy.py           ★ THE deployment command (imports the stages below)
 │   ├── fetch_sheet.py      1. Google Sheet → rows JSON            (your ADC creds)
 │   ├── validate_sheet.py   2. rows JSON → PASS/FAIL log           (hard gate)
-│   ├── org_snapshot.py     3. ONE bulk org read (existence + fields + translations)
-│   ├── attr_drift.py       4. sheet definition vs org metadata, per existing object
+│   ├── org_snapshot.py     3. ONE bulk org read (existence, fields,
+│   │                          CustomObject metadata, translations)
+│   ├── attr_drift.py       4. sheet definition vs org metadata — pure, run
+│   │                          locally against the snapshot
 │   ├── plan_deploy.py      5. the delta → .build/deploy_plan.json
 │   ├── generate_xml.py     6. rows + plan → .build/staging/force-app/**
 │   ├── generate_object_translation.py
 │   │                       6b. patches the org's own CustomObjectTranslation tree
-│   ├── build_manifest.py   7. plan → package.xml (planned members only)
-│   ├── deploy.py           8. sf CLI deploy (check-only default)
-│   ├── verify_deploy.py    9. live post-deploy verification (Tooling API)
-│   ├── run.py              alias for `prep_deploy.py --phase build`
+│   ├── build_manifest.py   7. plan → package.xml (or package.part1..N.xml)
+│   ├── sf_deployer.py      8. INTERNAL: one `sf` CLI deploy of one package
+│   ├── verify_deploy.py    9. live verification (objects, fields, translations)
+│   ├── build_destructive.py   the IsDelete → destructiveChanges.xml flow
+│   ├── prep_deploy.py      deprecated shim → deploy.py
 │   └── generate_*.py       layout / flexipage / permission-set generators (reused)
+├── tests/                  pytest suite (org-free; two-sandbox test opt-in)
 ├── .build/
 │   ├── org_snapshot.json   the single target-org read
 │   ├── deploy_plan.json    the single source of deploy scope
@@ -29,14 +33,26 @@ sf-deploy/
 └── .build/                 disposable reports (validation_report.json, …)
 ```
 
-## The canonical command
+## The deployment command
 
 One command does the whole chain — including object translations. There is no
 separate translation step and no second pipeline:
 
 ```bash
-python scripts/prep_deploy.py --org "<TARGET_ORG>" --tabs "<OBJECT_TABS>" --phase deploy
+python scripts/deploy.py --org "<TARGET_ORG>" --tabs "<OBJECT_TABS>" --start
 ```
+
+Three modes, one plan, so a dry run and the real deploy can never disagree
+about scope:
+
+| mode | what it does |
+|---|---|
+| `--plan` | delta only: fetch, validate, snapshot, plan. No files, no org writes. |
+| *(default)* `--check-only` | additionally generate, package and validate every package against the org. Still no writes. |
+| `--start` | the real deploy: every package part in order, each verified live. |
+
+Add `--deletes` to also execute the IsDelete set (destructive — deleting a
+field destroys its data).
 
 ```
 live sheet fetch
@@ -45,10 +61,12 @@ live sheet fetch
   → attribute drift (existing objects)
   → deployment plan / delta          .build/deploy_plan.json
   → staged metadata generation       .build/staging/force-app
-  → one explicit manifest FROM THE PLAN
-  → check-only deployment
-  → real deployment
-  → live post-deployment verification
+  → one explicit manifest FROM THE PLAN   package.xml / package.part1..N.xml
+  → check-only deployment of every part
+  → real deployment of every part, each verified before the next
+  → destructive deploy of the IsDelete set  (--deletes)
+  → live verification: objects, fields AND translations
+  → verified translation state + report refresh
 ```
 
 What the delta packages:
@@ -57,15 +75,22 @@ What the delta packages:
 |---|---|
 | object missing in the org | the CustomObject + all deployable fields + all new translations |
 | object exists | only fields the org does not have + their new translations |
+| existing object whose new field needs object metadata (history tracking, Master-Detail) | the CustomObject too — never its existing fields |
+| standard `Name` drift approved | the CustomObject (Name is not a CustomField member) |
 | field already in the org | nothing — never redeployed silently |
 | field definition changed (drift) | nothing, until you pass `--include-drift Obj__c.Field__c` |
 | row flagged `WIP` | nothing — ignored entirely |
 | row flagged `IsDelete` | the separate destructive flow (`build_destructive.py`) |
 
 Re-running with no sheet changes is a no-op: the plan comes out empty, no
-package is built and no org write is attempted. Use `--phase build` (the
-default) for everything except the real deploy, and `--lang` to pick the
-Translation Workbench language (`off` to skip translations).
+package is built and no org write is attempted. `--lang` picks the Translation
+Workbench language (`off` skips translations). A plan larger than
+`--max-components` (default 9000) splits into `package.part1..N.xml`, and
+**every part is deployed, in order** — each verified before the next is sent.
+
+The deep technical contract for translations (patch-never-rebuild, the standard
+`Name` field, the delta codes) is in
+[`../docs/TRANSLATION_STRATEGY.md`](../docs/TRANSLATION_STRATEGY.md).
 
 ## Prerequisites (one-time)
 
@@ -94,14 +119,17 @@ cd "sf-deploy"
 python scripts/fetch_sheet.py --spreadsheet-id <SHEET_ID> --list-tabs
 
 # ORG-SELECTION GATE: always pick the target from the connected orgs
-python scripts/deploy.py --list-orgs
+python scripts/sf_deployer.py --list-orgs
 
-# plan + validate + stage + dry-run (no org writes) — review the plan
-python scripts/prep_deploy.py --org "ERP DEV 02" --tabs "輸入・入庫管理明細"
+# the delta only — no files built, no org writes
+python scripts/deploy.py --org "ERP DEV 02" --tabs "輸入・入庫管理明細" --plan
 cat .build/deploy_plan.json
 
+# build + validate every package against the org (still no writes)
+python scripts/deploy.py --org "ERP DEV 02" --tabs "輸入・入庫管理明細"
+
 # REAL deploy of exactly that plan, then live verification
-python scripts/prep_deploy.py --org "ERP DEV 02" --tabs "輸入・入庫管理明細" --phase deploy
+python scripts/deploy.py --org "ERP DEV 02" --tabs "輸入・入庫管理明細" --start
 ```
 
 The delta is automatic: only fields the org lacks are packaged, so an
@@ -109,25 +137,25 @@ The delta is automatic: only fields the org lacks are packaged, so an
 DEFINITION changed, review the reported drift and opt in explicitly:
 
 ```bash
-python scripts/prep_deploy.py --org "ERP DEV 02" --tabs "MyObject" \
-    --include-drift "MyObject__c.Changed_Field__c" --phase deploy
+python scripts/deploy.py --org "ERP DEV 02" --tabs "MyObject" \
+    --include-drift "MyObject__c.Changed_Field__c" --start
 ```
 
-### Deletions
+### Deletions (the `IsDelete` column)
+
+Rows flagged `IsDelete` never enter the additive package. The command builds
+them into `destructiveChanges.xml` and reports them on every run; the
+destructive deploy itself only happens when you ask for it, because deleting a
+field also destroys its data:
 
 ```bash
-cat > deletions.json <<'JSON'
-{ "CustomField": ["MyObject__c.Old_Field__c"] }
-JSON
-python scripts/build_manifest.py --destroy deletions.json
-python scripts/deploy.py --start --pre-destructive manifest/destructiveChanges.xml --target-org "ERP DEV 02"
+python scripts/deploy.py --org "ERP DEV 02" --tabs "MyObject" --start --deletes
 ```
 
 ## Safety model
 
 - **Org-selection gate.** Every deploy must target an explicitly-chosen
-  connected org. `deploy.py` shows the org list and BLOCKS if `--target-org`
-  isn't given — it never silently uses the sf default.
+  connected org; the target org's immutable Id is recorded in the plan.
 - **Validation is a hard gate.** The pipeline stops if `validate_sheet.py`
   reports any `ERROR`; nothing is generated and nothing is packaged.
 - **Nothing is deployed that the plan does not name.** The manifest is built
@@ -143,7 +171,21 @@ python scripts/deploy.py --start --pre-destructive manifest/destructiveChanges.x
 - **Translation state is recorded only after verification**, keyed by the org's
   immutable Id, so a failed deploy can never look "already deployed" and one
   sandbox's history can never mask another's.
+- **Every package part is deployed.** A split plan records its manifest index
+  in the plan; the command iterates all parts and stops if one does not land,
+  rather than leaving parts 2..N behind.
+- **Translations are verified too.** A translation-only deploy is confirmed by
+  reading `CustomObjectTranslation` back from the org before any sync state is
+  written.
 - `deploy.py` with no `--start` is **check-only** and never writes to the org.
+
+## Tests
+
+```bash
+python3 -m pytest tests -q          # org-free: plan, manifest, verification
+SEAP_TEST_ORG_A=<alias> SEAP_TEST_ORG_B=<alias> SEAP_TEST_TABS="<tab>" \
+    python3 -m pytest tests/test_sandbox_integration.py -v   # check-only, 2 sandboxes
+```
 
 ## Validation rules
 

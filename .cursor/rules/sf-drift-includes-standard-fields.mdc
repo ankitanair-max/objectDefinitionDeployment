@@ -53,7 +53,7 @@ name-only or custom-only drift check is a false "all clear".
   (AutoNumber) displayFormat differ. If the object-meta row or the org
   `<nameField>` is missing, it prints a WARNING that Name drift was NOT checked
   rather than silently passing.
-- `prep_deploy.py` runs `attr_drift.py` in its build phase, so this Name check
+- `deploy.py` runs `attr_drift.py` in its build phase, so this Name check
   runs automatically for every existing object.
 
 ## Guardrails

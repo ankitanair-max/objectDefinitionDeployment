@@ -24,12 +24,12 @@ delta says are new:
 
 Future delta (Japan adds a field to an already-translated object):
   1. They add the row (JA in Field Label, EN in Field Label (EN), API in fullName).
-  2. translation_drift --new-only marks that field NEW_TRANSLATION.
+  2. plan_deploy marks that field NEW_TRANSLATION in the deployment plan.
   3. This script patches that one field into the retrieved org translation.
 
 Usage:
   python scripts/generate_object_translation.py --rows temp_updates.json \
-      --org <ORG> --lang en_US --delta .build/translation_drift_objects.json
+      --snapshot .build/org_snapshot.json --lang en_US --delta .build/deploy_plan.json
 """
 from __future__ import annotations
 
@@ -143,11 +143,11 @@ def write_translation_dir(root: Path, obj: str, lang: str,
     return len(fields)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Generate CustomObjectTranslation XML")
     ap.add_argument("--rows", default="", help="temp_updates.json from fetch_sheet.py")
     ap.add_argument("--catalog", default="", help="translation_catalog.json")
-    ap.add_argument("--delta", default="", help="translation_drift.json — only objects with PKG rows")
+    ap.add_argument("--delta", default="", help="deploy_plan.json — only the entries the plan packages")
     ap.add_argument("--org", default="",
                     help="only needed without --snapshot (a live per-object read)")
     ap.add_argument("--snapshot", default="",
@@ -157,7 +157,7 @@ def main() -> int:
     ap.add_argument("--on-unavailable", choices=["error", "skip"], default="error",
                     help="org without Translation Workbench / the language active")
     ap.add_argument("--out-root", default=str(OUT_ROOT))
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     entries: list[dict] = []
     if args.catalog:
@@ -179,7 +179,7 @@ def main() -> int:
     package_ids: set[str] | None = None
     if args.delta:
         delta = json.loads(Path(args.delta).read_text(encoding="utf-8"))
-        # accept either a translation_drift list or a deploy_plan.json
+        # accept either a plain delta list or a deploy_plan.json
         if isinstance(delta, dict):
             delta = delta.get("translations") or []
         package_ids = {d["id"] for d in delta if d.get("package")}

@@ -3,15 +3,20 @@
 attr_drift.py — GRANULAR, attribute-level drift check between the sheet's
 intended field DEFINITIONS and the org's ACTUAL field metadata, for any object.
 
-Why this exists: the delta step (prep_deploy/fetch_sheet) compares field API
-*names* only. A field that already exists in the org by name is treated as
+Why this exists: the name delta compares field API *names* only. A field that already exists in the org by name is treated as
 "already deployed" and skipped — even if the sheet later changed its TYPE,
 FORMULA, referenceTo, or PICKLIST values. This tool closes that blind spot by
 comparing the actual definitions for fields present in BOTH sheet and org.
 
-It reads the org's live metadata via the Metadata API `readMetadata`
-(CustomObject) with a session from the supported CLI (`sf org display`), so it
-works on any machine where the CLI is authorized for --org.
+In the pipeline this file is used as a LIBRARY: `deploy.py` already has every
+object's CustomObject metadata in the bulk org snapshot, and the planner calls
+`parse_org_object()` + `compute_drift()` locally — no per-object
+authentication, no per-object Metadata API call. Each drift entry carries a
+`component` ("CustomField", or "CustomObject" for the standard Name field),
+because Obj__c.Name is not a deployable CustomField member.
+
+The standalone CLI below still does its own live `readMetadata(CustomObject)`
+with a session from the supported CLI (`sf org display`), for ad-hoc checks.
 
 Usage (standalone, live fetch):
   python scripts/attr_drift.py --object TI_Fnt_Deal__c --tab Deal \
@@ -26,7 +31,7 @@ field differs (useful as a gate). Missing org object -> exit 0 with a note (a NE
 object has nothing to drift against).
 """
 from __future__ import annotations
-import argparse, json, os, re, subprocess, sys, urllib.request, urllib.error
+import argparse, json, os, pathlib, re, subprocess, sys, urllib.request, urllib.error
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -83,19 +88,59 @@ def map_dt(dt: str):
     return dt.strip(), False, False  # unmapped: literal compare + flagged
 
 
-def load_token(org: str | None, token_file: str) -> dict:
+def load_token(org: str) -> dict:
     """Session for `org` from the supported CLI (`sf org display`).
 
     No keychain decryption and no assumption about where the CLI stores its
     auth, so this behaves the same on a laptop, a build agent or a container.
     """
-    if org:
-        return org_auth(org)
-    return json.load(open(token_file))["result"]
+    if not org:
+        raise OrgAuthError("pass --org: the session comes from the Salesforce "
+                           "CLI, there is no auth file to fall back on.")
+    return org_auth(org)
+
+
+def parse_org_object(rec: ET.Element) -> dict | None:
+    """CustomObject <records> element -> {fieldFullName: {type, formula, ...}}.
+
+    Pure: no network. The caller supplies the element, so the same comparison
+    runs against a live read OR against the bulk org snapshot.
+    """
+    if rec is None or rec.find("fullName") is None:
+        return None  # object absent in org
+    org = {}
+    for f in rec.iter("fields"):
+        d = {c.tag: (c.text or "") for c in f}
+        vals = [v.findtext("fullName", "") for v in f.iter("value")]
+        if vals:
+            d["_picklist"] = [x for x in vals if x]
+        org[d.get("fullName", "")] = d
+    # capture the standard Name field (nameField block on the CustomObject) so the
+    # drift check can compare it too — it is NOT under <fields> and would otherwise
+    # be invisible (Text vs AutoNumber + displayFormat drift silently missed).
+    # object-level attributes a FIELD can depend on: a field with
+    # trackHistory=true needs enableHistory on the object, a Master-Detail
+    # field forces sharingModel=ControlledByParent.
+    org["__object__"] = {
+        "enableHistory": rec.findtext("enableHistory", "") or "",
+        "sharingModel": rec.findtext("sharingModel", "") or "",
+    }
+    nf = rec.find("nameField")
+    if nf is not None:
+        org["__nameField__"] = {
+            "type": nf.findtext("type", "") or "",
+            "displayFormat": nf.findtext("displayFormat", "") or "",
+            "label": nf.findtext("label", "") or "",
+        }
+    return org
 
 
 def read_org_object(api: str, tok: str, inst: str, ver: str) -> dict | None:
-    """readMetadata(CustomObject) -> {fieldFullName: {type, formula, referenceTo, _picklist}}."""
+    """Live readMetadata(CustomObject) for ONE object (standalone CLI path).
+
+    The pipeline does not use this: `org_snapshot.py` reads every target
+    object's CustomObject in one bulk pass and the planner compares locally.
+    """
     soap = (
         '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
         'xmlns:met="http://soap.sforce.com/2006/04/metadata"><soapenv:Header>'
@@ -111,56 +156,14 @@ def read_org_object(api: str, tok: str, inst: str, ver: str) -> dict | None:
         raise MetadataApiError(f"readMetadata HTTP {e.code}: {e.read().decode()[:300]}")
     except urllib.error.URLError as e:
         raise MetadataApiError(f"readMetadata: cannot reach {inst} ({e.reason})")
-    # namespace-AWARE parse: the parser resolves the prefixes and we drop the
-    # URIs on the parsed tree, so element text is never mangled.
     root = parse_soap(xml)
-    rec = root.find(".//records")
-    if rec is None or rec.find("fullName") is None:
-        return None  # object absent in org
-    org = {}
-    for f in root.iter("fields"):
-        d = {c.tag: (c.text or "") for c in f}
-        vals = [v.findtext("fullName", "") for v in f.iter("value")]
-        if vals:
-            d["_picklist"] = [x for x in vals if x]
-        org[d.get("fullName", "")] = d
-    # capture the standard Name field (nameField block on the CustomObject) so the
-    # drift check can compare it too — it is NOT under <fields> and would otherwise
-    # be invisible (Text vs AutoNumber + displayFormat drift silently missed).
-    nf = rec.find("nameField")
-    if nf is not None:
-        org["__nameField__"] = {
-            "type": nf.findtext("type", "") or "",
-            "displayFormat": nf.findtext("displayFormat", "") or "",
-            "label": nf.findtext("label", "") or "",
-        }
-    return org
+    return parse_org_object(root.find(".//records"))
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Attribute-level sheet<->org drift")
-    ap.add_argument("--object", required=True, help="object API name, e.g. TI_Fnt_Deal__c")
-    ap.add_argument("--rows", help="pre-fetched fetch_sheet JSON (skip live fetch)")
-    ap.add_argument("--tab", help="sheet tab (for live fetch when --rows absent)")
-    ap.add_argument("--spreadsheet-id")
-    ap.add_argument("--org", help="alias/username to mint a live session token")
-    ap.add_argument("--token-file", default=".build/orgauth.json")
-    ap.add_argument("--out", default=".build/attr_drift.json")
-    ap.add_argument("--fail-on-drift", action="store_true")
-    args = ap.parse_args()
-
-    # 1) sheet rows
-    if args.rows:
-        rows = json.load(open(args.rows))
-    else:
-        if not (args.tab and args.spreadsheet_id):
-            sys.exit("❌ need --rows OR (--tab and --spreadsheet-id)")
-        subprocess.run(["python3", "scripts/fetch_sheet.py", "--spreadsheet-id", args.spreadsheet_id,
-                        "--tabs", args.tab, "--out", ".build/_attr_rows.json"], check=True)
-        rows = json.load(open(".build/_attr_rows.json"))
-
-    obj_norm = args.object.replace("__c", "")
-    sheet = []
+def sheet_rows_for(object_api: str, rows: list[dict]) -> list[dict]:
+    """Custom-field rows of `rows` that belong to `object_api`."""
+    obj_norm = object_api.replace("__c", "")
+    out = []
     for r in rows:
         api = (r.get("Field API Name") or "").strip()
         if not api.endswith("__c"):
@@ -168,21 +171,23 @@ def main() -> int:
         own = str(r.get("Object API Name") or "").replace("__c", "")
         if own and own != obj_norm:
             continue
-        sheet.append(r)
+        out.append(r)
+    return out
 
-    # 2) org metadata
-    try:
-        a = load_token(args.org, args.token_file)
-        org = read_org_object(args.object, a["accessToken"],
-                              a["instanceUrl"].rstrip("/"), a["apiVersion"])
-    except (OrgAuthError, MetadataApiError) as e:
-        print(f"❌ {e}")
-        return 1
-    if org is None:
-        print(f"ℹ️  {args.object} not in org (NEW object) — no attribute drift to check.")
-        json.dump([], open(args.out, "w"))
-        return 0
 
+def compute_drift(object_api: str, all_rows: list[dict], org: dict
+                  ) -> tuple[list[dict], int, list[str]]:
+    """Compare the sheet's field DEFINITIONS against the org's metadata.
+
+    Pure: `org` is a parsed CustomObject (see parse_org_object), so this runs
+    identically against a live read or the bulk snapshot. Returns
+    (drift, in_sync_count, warnings). Every entry carries a `component`
+    ("CustomField" or "CustomObject") because the standard Name field lives on
+    the CustomObject, not on a CustomField — packaging `Obj__c.Name` as a
+    CustomField member is invalid metadata.
+    """
+    sheet_rows = sheet_rows_for(object_api, all_rows)
+    warnings: list[str] = []
     # helpers for secondary-attribute compare
     def _num(v):
         s = str(v or "").strip()
@@ -199,7 +204,7 @@ def main() -> int:
 
     # 3) compare
     drift, insync = [], 0
-    for r in sheet:
+    for r in sheet_rows:
         api = r["Field API Name"].strip()
         dt = (r.get("Data Type") or "").strip()
         tsv = (r.get("Type Specific Value") or "").strip()
@@ -277,7 +282,7 @@ def main() -> int:
     # and is not a __c custom field, so the custom-field loop above never sees it.
     # This is exactly how Receiving/ReceivingDetail shipped Name=Text while the sheet
     # declared AutoNumber. Compare it explicitly, every run.
-    meta = next((r for r in rows if (r.get("Name Field Type") or r.get("Name Field Display Format")
+    meta = next((r for r in all_rows if (r.get("Name Field Type") or r.get("Name Field Display Format")
                                      or str(r.get("_type") or "").lower() == "object")), None)
     onf = org.get("__nameField__")
     if meta is not None and onf is not None:
@@ -302,24 +307,79 @@ def main() -> int:
         print("⚠️  no object-meta row with 'Name Field Type' found — Name drift NOT checked "
               "(re-fetch with the object-meta row so the standard Name field is verified).")
     elif onf is None:
-        print("⚠️  org CustomObject returned no <nameField> — Name drift NOT checked.")
+        warnings.append("org CustomObject returned no <nameField> — Name drift NOT checked")
 
+
+    for d in drift:
+        d.setdefault("component", "CustomObject" if d["field"] == "Name" else "CustomField")
     drift.sort(key=lambda d: d["field"])
-    print("=" * 96)
-    print(f"ATTRIBUTE DRIFT — {args.object}   (in-sync: {insync}   drifted: {len(drift)})")
-    print("=" * 96)
-    if drift:
-        print(f"{'FIELD':<44}{'SHEET':<16}{'ORG':<24}REASON")
-        print("-" * 96)
-        for d in drift:
-            print(f"{d['field']:<44}{d['sheet']:<16}{d['org']:<24}{d['reason']}")
+    return drift, insync, warnings
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Attribute-level sheet<->org drift")
+    ap.add_argument("--object", required=True, help="object API name, e.g. TI_Fnt_Deal__c")
+    ap.add_argument("--rows", help="pre-fetched fetch_sheet JSON (skip live fetch)")
+    ap.add_argument("--tab", help="sheet tab (for live fetch when --rows absent)")
+    ap.add_argument("--spreadsheet-id")
+    ap.add_argument("--org", help="alias/username to mint a live session token")
+    ap.add_argument("--out", default=".build/attr_drift.json")
+    ap.add_argument("--fail-on-drift", action="store_true")
+    args = ap.parse_args()
+
+    # 1) sheet rows
+    if args.rows:
+        rows = json.loads(pathlib.Path(args.rows).read_text(encoding="utf-8"))
     else:
-        print("  ✅ every existing field matches the sheet definition.")
-    json.dump(drift, open(args.out, "w"), indent=2, ensure_ascii=False)
+        if not (args.tab and args.spreadsheet_id):
+            print("❌ need --rows OR (--tab and --spreadsheet-id)")
+            return 2
+        tmp = pathlib.Path(".build/_attr_rows.json")
+        subprocess.run(["python3", str(pathlib.Path(__file__).with_name("fetch_sheet.py")),
+                        "--spreadsheet-id", args.spreadsheet_id, "--tabs", args.tab,
+                        "--out", str(tmp)], check=True)
+        rows = json.loads(tmp.read_text(encoding="utf-8"))
+
+    # 2) org metadata (standalone: one live read for this object)
+    try:
+        a = load_token(args.org)
+        org = read_org_object(args.object, a["accessToken"],
+                              a["instanceUrl"].rstrip("/"), a["apiVersion"])
+    except (OrgAuthError, MetadataApiError) as e:
+        print(f"❌ {e}")
+        return 1
+    if org is None:
+        print(f"ℹ️  {args.object} not in org (NEW object) — no attribute drift to check.")
+        pathlib.Path(args.out).write_text("[]", encoding="utf-8")
+        return 0
+
+    # 3) compare (same pure function the planner uses)
+    drift, insync, warnings = compute_drift(args.object, rows, org)
+    for w in warnings:
+        print(f"⚠️  {w}")
+    print(report(args.object, drift, insync))
+    pathlib.Path(args.out).write_text(
+        json.dumps(drift, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\nsaved -> {args.out}")
     if drift and args.fail_on_drift:
         return 2
     return 0
+
+
+def report(object_api: str, drift: list[dict], insync: int) -> str:
+    """Human-readable drift table (shared by the CLI and the planner)."""
+    out = ["=" * 96,
+           f"ATTRIBUTE DRIFT — {object_api}   (in-sync: {insync}   drifted: {len(drift)})",
+           "=" * 96]
+    if drift:
+        out.append(f"{'FIELD':<40}{'COMPONENT':<16}{'SHEET':<14}{'ORG':<20}REASON")
+        out.append("-" * 96)
+        for d in drift:
+            out.append(f"{d['field']:<40}{d.get('component', ''):<16}"
+                       f"{d['sheet']:<14}{d['org']:<20}{d['reason']}")
+    else:
+        out.append("  ✅ every existing field matches the sheet definition.")
+    return "\n".join(out)
 
 
 if __name__ == "__main__":

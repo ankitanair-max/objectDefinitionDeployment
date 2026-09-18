@@ -1,5 +1,5 @@
 ---
-description: Object-tab English is the header Field Label (EN). Tabs without that header are untranslated and skipped entirely. Future field adds are picked up by translation_drift --new-only in the same prep_deploy as the field delta.
+description: Object-tab English is the header Field Label (EN). Tabs without that header are untranslated and skipped entirely. Future field adds are picked up as NEW_TRANSLATION by the deployment plan, in the same deploy.py run as the field delta.
 alwaysApply: true
 ---
 
@@ -36,7 +36,7 @@ Translations are part of the ONE canonical command — there is no separate
 operator step:
 
 ```
-python scripts/prep_deploy.py --org "<ORG>" --tabs "<TABS>" --phase deploy
+python scripts/deploy.py --org "<ORG>" --tabs "<TABS>" --start
 ```
 
 The translation delta is computed from the **single org snapshot**
@@ -57,7 +57,7 @@ object/field delta, and it is recorded in the **deployment plan**
  delta, and its hash is recorded in the sync state **only after**
  `verify_deploy.py` confirms the deploy landed.
 
-`--lang` defaults to `en_US` and is a `prep_deploy.py` flag (`--lang off` skips
+`--lang` defaults to `en_US` and is a `deploy.py` flag (`--lang off` skips
 translations entirely). Only the selected language directory
 (`objectTranslations/<Obj>__c-<LANG>`) is regenerated — other languages staged
 in the tree are left untouched.
@@ -104,13 +104,13 @@ on the parent. Never emit a `Name` field translation file.
 
 - **Auth:** sessions come from the supported CLI (`sf org display --verbose
   --json --target-org <ORG>`). Never decrypt the CLI keychain, never assume
-  `~/.sfdx`, `~/.local/share/sf/...`, or a rewritten `HOME`. `prep_deploy.py`
+  `~/.sfdx`, `~/.local/share/sf/...`, or a rewritten `HOME`. `deploy.py`
   inherits the environment by default; `--sf-home` / `--xdg-data-home` are
   opt-in sandbox overrides.
 - **Preflight:** if the org cannot serve translations for `<LANG>` (Translation
   Workbench off, language not activated), the tools raise an actionable error
   naming Setup → Translation Language Settings. `--on-unavailable skip`
-  (`prep_deploy.py --on-translation-unavailable skip`) is the explicit opt-out
+  (`deploy.py --on-translation-unavailable skip`) is the explicit opt-out
   that deploys the fields without translations.
 - **State:** `.build/translation_sync_state.json` is keyed by target **org Id**,
   never by alias, so one sandbox's hashes can never mark another sandbox's
@@ -119,6 +119,6 @@ on the parent. Never emit a `Name` field translation file.
 ## Future field add (Japan team)
 
 Sheet row: JA in `Field Label`, EN in `Field Label (EN)`, API in `fullName`.
-Next `prep_deploy.py` for that tab: field name-delta creates the CustomField;
+Next `deploy.py` for that tab: field name-delta creates the CustomField;
 `--new-only` marks only that row `NEW_TRANSLATION`; generate patches it into the
 org COT. Existing translations stay as they are.

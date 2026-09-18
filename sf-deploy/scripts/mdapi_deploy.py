@@ -57,7 +57,7 @@ def _drift_gate(package_path: str, rows_path: str, auth_json: str,
     The name-based package only proves a field is being created/updated; it does
     NOT catch a field that already EXISTS in the org but whose DEFINITION (type /
     formula / referenceTo / picklist / precision …) diverges from the sheet. That
-    check lived only in prep_deploy.py (the sf-CLI path); this makes it run on the
+    check lived only in the sf-CLI path; this makes it run on the
     CLI-free SOAP path too, so it can never be silently skipped again.
 
     Returns True to proceed, False to abort. Absent fields (genuinely new,

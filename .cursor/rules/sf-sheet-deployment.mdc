@@ -24,7 +24,7 @@ scope for a new task without re-confirming.
    whole task: pass it as `--tabs "<tab1,tab2>"` to fetch/validate and
    `--only "<Obj1__c,Obj2__c>"` to the manifest.
 3. Only if the user EXPLICITLY chooses "all objects" do you run without `--tabs`.
-   `scripts/run.py` refuses to run without `--tabs` unless `--all-tabs` is passed.
+   `scripts/deploy.py` requires `--tabs`; there is no implicit "all tabs" run.
 4. If a request is ambiguous about scope (e.g. "validate the sheet", "deploy the
    changes"), STOP and ask which tab/object first — do not guess.
 
@@ -35,7 +35,7 @@ canonical command** — it performs every step below, including the object/field
 delta and the translations:
 
 ```
-python scripts/prep_deploy.py --org "<ORG>" --tabs "<tab1,tab2>" --phase deploy
+python scripts/deploy.py --org "<ORG>" --tabs "<tab1,tab2>" --start
 ```
 
 The individual scripts below are what that command runs; invoke them by hand
@@ -71,16 +71,17 @@ explicit scope (see step 3).
    `python scripts/build_manifest.py --plan .build/deploy_plan.json --out <pkg>`.
    Never a directory scan: the scan can pick up stale metadata from an earlier
    run. The plan's members already include the `CustomObjectTranslation`s.
-7. **Deploy** — `scripts/deploy.py` (see gating below), run against the staged
-   project (`--project-dir .build/staging`).
+7. **Deploy** — every package part in order, each executed by the internal
+   `scripts/sf_deployer.py` against the staged project
+   (`--project-dir .build/staging`).
 8. **Verify** — `verify_deploy.py --plan .build/deploy_plan.json` (Tooling API,
    FLS-independent). The deploy log is never trusted on its own.
 9. **Report** — after a successful real deploy, append/refresh the object's tab in
    `reports/Object_Deployment_Report.xlsx` via `scripts/build_object_report.py`
    (see "Post-deploy report" below).
 
-`run.py` is a thin alias for `prep_deploy.py --phase build`; it no longer runs a
-pipeline of its own.
+`prep_deploy.py` is a deprecated shim that forwards to `deploy.py`
+(`--phase deploy` → `--start`); it runs no pipeline of its own.
 
 ## Incremental deploys
 
@@ -89,14 +90,14 @@ does not have, so an incremental run is simply the canonical command again. A
 field whose DEFINITION changed is reported as attribute drift and packaged only
 when you opt in per field (`--include-drift Obj__c.Field__c`). For deletions,
 the `IsDelete` rows go through `build_destructive.py` →
-`destructiveChanges.xml`, then `deploy.py --pre-destructive ...`.
+`destructiveChanges.xml`, then `deploy.py --start --deletes`.
 
 ## Org-selection quality gate (MANDATORY before every deploy)
 
 Before ANY deployment — check-only or real — you MUST present the list of
 connected orgs and have the user pick the target. There is NO silent default.
 
-1. Run `python scripts/deploy.py --list-orgs` to get the connected orgs.
+1. Run `python scripts/sf_deployer.py --list-orgs` to get the connected orgs.
 2. Show that list to the user (use the ask_user / question UI with one option
    per org) and let them choose exactly one.
 3. Pass the chosen org explicitly: `--target-org "<alias>"` (or the list index).

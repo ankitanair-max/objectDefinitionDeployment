@@ -9,11 +9,13 @@ N objects costs a bounded, predictable number of API calls:
   1 × `sf org display`                      (identity + session)
   ceil(N/200) × EntityDefinition SOQL       (object existence, batched IN)
   ceil(N/50)  × Tooling CustomField SOQL    (existing field names, batched IN)
+  ceil(N/10)  × readMetadata CustomObject   (attribute drift, computed locally)
   ceil(N/10)  × readMetadata COT            (translation snapshot, if translated)
 
-Previously translation_drift retrieved translations and then
-generate_object_translation retrieved them AGAIN per object (~ceil(N/10) + N
-calls). The snapshot removes that duplication.
+Every duplicate read is gone: translations were previously retrieved by the
+drift step and AGAIN per object by the generator, and attribute drift spawned
+attr_drift.py — one authentication plus one Metadata call — for every existing
+object. Both now read this snapshot.
 
 Reads are independent, so the SOQL batches run with bounded concurrency; the
 results are re-sorted afterwards, so the snapshot (and every plan built from
@@ -36,8 +38,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from translation_lib import (  # noqa: E402
     BUILD_DIR, DEFAULT_LANG, InvalidApiName, MetadataApiError, OrgAuthError,
-    TranslationUnavailable, chunks, norm, org_auth, read_object_translations,
-    soql_in_list, soql_name,
+    TranslationUnavailable, chunks, norm, org_auth, read_metadata,
+    read_object_translations, soql_in_list, soql_name,
 )
 
 DEFAULT_OUT = BUILD_DIR / "org_snapshot.json"
@@ -111,6 +113,23 @@ def existing_fields(objs: list[str], org: str) -> dict[str, list[str]]:
     return {o: sorted(v) for o, v in sorted(out.items())}
 
 
+def object_snapshot(objs: list[str], auth: dict) -> dict[str, str]:
+    """One bulk readMetadata(CustomObject) for every existing target object.
+
+    This is what makes attribute drift a LOCAL computation: the planner parses
+    these records and compares them to the sheet, instead of the orchestrator
+    spawning attr_drift.py (one authentication + one Metadata call) per object.
+    """
+    snap: dict[str, str] = {}
+    records = read_metadata("CustomObject", sorted(objs), auth["accessToken"],
+                            auth["instanceUrl"].rstrip("/"), auth["apiVersion"])
+    for rec in records:
+        full = norm(rec.findtext("fullName"))
+        if full:
+            snap[full] = ET.tostring(rec, encoding="unicode")
+    return snap
+
+
 def translation_snapshot(objs: list[str], lang: str, auth: dict) -> dict[str, str]:
     """One bulk readMetadata of every object's CustomObjectTranslation.
 
@@ -133,6 +152,9 @@ def take(objs: list[str], org: str, lang: str = DEFAULT_LANG,
     auth = org_auth(org)
     present = existing_objects(objs, org) if objs else set()
     fields = existing_fields(sorted(present), org) if present else {}
+    # CustomObject metadata for the existing objects: attribute drift (custom
+    # fields AND the standard Name field) is computed from this locally.
+    object_meta = object_snapshot(sorted(present), auth) if present else {}
 
     translations: dict[str, str] = {}
     translation_state = "off" if lang in ("", "off") else "ok"
@@ -162,6 +184,7 @@ def take(objs: list[str], org: str, lang: str = DEFAULT_LANG,
         "lang": lang,
         "objects": {o: {"exists": o in present} for o in objs},
         "fields": fields,
+        "objectMeta": object_meta,
         "translations": translations,
         "translationState": translation_state,
         "translationNote": translation_note,
@@ -181,14 +204,20 @@ def translation_record(snapshot: dict, obj: str) -> ET.Element | None:
     return ET.fromstring(xml) if xml else None
 
 
-def main() -> int:
+def object_record(snapshot: dict, obj: str) -> ET.Element | None:
+    """The object's CustomObject metadata from the bulk snapshot (no org call)."""
+    xml = (snapshot.get("objectMeta") or {}).get(obj)
+    return ET.fromstring(xml) if xml else None
+
+
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="One bulk snapshot of the target org")
     ap.add_argument("--org", required=True)
     ap.add_argument("--objects", required=True, help="comma-separated object API names")
     ap.add_argument("--lang", default=DEFAULT_LANG, help="'off' to skip translations")
     ap.add_argument("--on-unavailable", choices=["error", "skip"], default="error")
     ap.add_argument("--out", default=str(DEFAULT_OUT))
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     objs = [o.strip() for o in args.objects.split(",") if o.strip()]
     try:

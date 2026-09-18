@@ -47,7 +47,7 @@ the 0-based indices below are only a fallback.
    `Field Label (EN)` by header name (fall back to the indices above only
    if the header is absent). The scripts `fetch_sheet.py`, `mark_wip.py`,
    `write_back.py`, `write_ai_comments.py`, `write_deploy_status.py`,
-   `translation_drift.py` follow this. Note AH's header text is now
+   `plan_deploy.py` follow this. Note AH's header text is now
    **`GDC AI Tool Comments`** (was `FreeColumnGDC1`) — match either for
    backwards-compat, prefer the new name.
 5. **Tab (Z) + section (AA):** page-layout inputs — `Tab` = top-level record-page

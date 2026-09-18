@@ -33,7 +33,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from translation_lib import soql_name  # noqa: E402
+from translation_lib import (  # noqa: E402
+    DEFAULT_LANG, MetadataApiError, OrgAuthError, TranslationUnavailable, norm,
+    org_auth, parse_object_translation, read_object_translations, soql_name,
+)
 
 FIELD_SUFFIX = ".field-meta.xml"
 
@@ -118,7 +121,46 @@ def org_fields(obj: str, org: str) -> set[str]:
     return {f"{r['DeveloperName']}__c" for r in recs}
 
 
-def main() -> int:
+def packaged_translations(plan: dict) -> list[dict]:
+    """The translation entries the plan actually packaged."""
+    ids = set(plan.get("translationPackage") or [])
+    return [t for t in (plan.get("translations") or []) if t.get("id") in ids]
+
+
+def verify_translations(plan: dict, org: str) -> list[str]:
+    """Read CustomObjectTranslation LIVE and confirm every packaged entry.
+
+    Without this, a translation-only deploy passes verification on the strength
+    of its object/field check alone (there are no new fields to check), and the
+    sync state then records those hashes as verified. Returns a list of
+    failures; empty means every packaged translation is live in the org with
+    the value we deployed.
+    """
+    wanted = packaged_translations(plan)
+    if not wanted:
+        return []
+    lang = plan.get("lang") or DEFAULT_LANG
+    objs = sorted({t["component"] for t in wanted})
+    auth = org_auth(org)
+    live: dict[str, dict] = {}
+    for rec in read_object_translations(objs, lang, auth):
+        full = norm(rec.findtext("fullName"))
+        obj = full.rsplit("-", 1)[0] if full else ""
+        if obj:
+            live.update(parse_object_translation(rec, obj, lang))
+
+    failures = []
+    for t in wanted:
+        got = live.get(t["id"])
+        if got is None:
+            failures.append(f"{t['id']}: not present in the org's {lang} translation")
+        elif norm(got.get("translation")) != norm(t.get("translation")):
+            failures.append(f"{t['id']}: org={got.get('translation')!r} "
+                            f"deployed={t.get('translation')!r}")
+    return failures
+
+
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Live post-deploy verification")
     ap.add_argument("--target-org", required=True)
     ap.add_argument("--source-root", default="force-app/main/default")
@@ -127,13 +169,14 @@ def main() -> int:
                          "(preferred over scanning the generated tree)")
     ap.add_argument("--objects", default="", help="comma-separated <Obj>__c to verify")
     ap.add_argument("--all", action="store_true", help="verify every generated object")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     only = {o.strip() for o in args.objects.split(",") if o.strip()} or None
     if not only and not args.all:
         print("❌ pass --objects <Api,...> or --all")
         return 2
 
+    plan = json.loads(Path(args.plan).read_text(encoding="utf-8")) if args.plan else {}
     if args.plan:
         expected = expected_from_plan(Path(args.plan), only)
         if not expected:
@@ -162,6 +205,22 @@ def main() -> int:
         print(f"      fields expected: {len(fields)}  |  present: {len([f for f in fields if f in present])}  |  missing: {len(missing)}")
         for m in missing:
             print(f"        ✗ MISSING field: {m}")
+
+    # translations are a deployed component too — verify them live, not by
+    # trusting that the package contained them.
+    if plan and plan.get("translationPackage"):
+        try:
+            failures = verify_translations(plan, args.target_org)
+        except (OrgAuthError, TranslationUnavailable, MetadataApiError) as e:
+            failures = [f"could not read translations: {e}"]
+        count = len(plan["translationPackage"])
+        print(f"\n  [{'OK' if not failures else 'FAIL'}] translations ({plan.get('lang')})")
+        print(f"      packaged: {count}  |  confirmed: {count - len(failures)}  "
+              f"|  failed: {len(failures)}")
+        for f in failures:
+            print(f"        ✗ {f}")
+        if failures:
+            overall_ok = False
 
     print("\n" + "=" * 72)
     print(f"  RESULT: {'ALL CONFIRMED IN ORG' if overall_ok else 'VERIFICATION FAILED — deploy did NOT fully land'}")
