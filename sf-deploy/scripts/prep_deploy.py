@@ -45,6 +45,7 @@ import sys
 from pathlib import Path
 
 DEFAULT_SHEET_ID = "1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ"
+# Live Data Dictionary: https://docs.google.com/spreadsheets/d/1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ
 OBJECTS_ROOT = Path("force-app/main/default/objects")
 VALIDATION_REPORT = Path(".build/validation_report.json")
 PACKAGE = Path("manifest/package.xml")
@@ -179,6 +180,22 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str]]:
     for o in objs:
         shutil.rmtree(OBJECTS_ROOT / o, ignore_errors=True)
     run(["python3", "scripts/generate_xml.py"], os.environ.copy(), capture=True)
+
+    # 4b) CustomObjectTranslation from Field Label (EN) / Object Label (EN)
+    #     on the SAME object tabs — automatic, no extra operator step.
+    print("\n[4b] generate object translations (en_US CustomObjectTranslation)")
+    for o in objs:
+        for p in Path("force-app/main/default/objectTranslations").glob(f"{o}-*"):
+            shutil.rmtree(p, ignore_errors=True)
+    run(["python3", "scripts/translation_drift.py",
+         "--rows", str(temp_path),
+         "--org", args.org, "--lang", "en_US", "--new-only",
+         "--out", ".build/translation_drift_objects.json"],
+        sf_env(args), capture=True)
+    run(["python3", "scripts/generate_object_translation.py",
+         "--rows", str(temp_path), "--org", args.org, "--lang", "en_US",
+         "--delta", ".build/translation_drift_objects.json"],
+        sf_env(args), capture=True)
 
     # 5) build ONE manifest for the whole batch
     print("\n[5/6] build manifest (single package for the batch)")

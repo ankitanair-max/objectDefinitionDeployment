@@ -1,28 +1,29 @@
 ---
-description: MANDATORY safety double-check before creating/deploying "new" fields — when a sheet field row has a BLANK API name (col D), first try to LABEL-match it to an existing org field (reuse that API) before treating it as new. Prevents deploying duplicate fields for rows whose API name was lost (e.g. a tab re-layout that dropped column D). Layers on top of sf-deploy-delta-and-blockers.mdc and sf-field-api-naming.mdc.
+description: MANDATORY safety double-check before creating/deploying "new" fields — when a sheet field row has a BLANK API name (header fullName), first try to LABEL-match it to an existing org field (reuse that API) before treating it as new. Prevents deploying duplicate fields for rows whose API name was lost (e.g. a tab re-layout that dropped fullName). Layers on top of sf-deploy-delta-and-blockers.mdc and sf-field-api-naming.mdc. Locate fullName by HEADER NAME.
 alwaysApply: true
 ---
 
 # Blank-API Rows: Label-Fallback Match Before Creating New Fields (MANDATORY)
 
-API name is ALWAYS the authoritative match key. This rule adds a **safety
-double-check ONLY for rows whose API name (col D) is BLANK**, so we never create
-a duplicate field for one that already exists in the org.
+API name is ALWAYS the authoritative match key. Locate it by header **`fullName`**.
+This rule adds a **safety double-check ONLY for rows whose `fullName` cell is
+BLANK**, so we never create a duplicate field for one that already exists in the
+org.
 
 ## Why this exists (real incident)
 
 `TI_Fnt_Receiving__c` fields were named + deployed (Aug 10) and their API names
-written back to col D of the old `Sales_Receiving` tab (confirmed by an Aug-20
-snapshot: 119/122 filled). The client later re-laid the workbook into the new
-"Format" layout: the new `Receiving` tab kept the LABELS but came in with a
-BLANK API-name column. A naive "blank API ⇒ new field" would have AI-named and
-deployed ~90 fields that already existed → mass duplicates. Label-fallback
-matching catches exactly this.
+written back to the `fullName` column of the old `Sales_Receiving` tab (confirmed
+by an Aug-20 snapshot: 119/122 filled). The client later re-laid the workbook
+into the new "Format" layout: the new `Receiving` tab kept the LABELS but came
+in with a BLANK API-name column. A naive "blank API ⇒ new field" would have
+AI-named and deployed ~90 fields that already existed → mass duplicates.
+Label-fallback matching catches exactly this.
 
 ## Required flow (per object, before deploy)
 
-1. **Primary match = API name (col D).** Rows with a valid `__c` API name are
-   matched to the org by API name as usual (delta + attribute-drift).
+1. **Primary match = API name (`fullName` header).** Rows with a valid `__c`
+   API name are matched to the org by API name as usual (delta + attribute-drift).
 2. **For every row with a BLANK API name**, do NOT go straight to "new". First
    run a **label-fallback match** against the org's LIVE field set:
    - Pull org fields FLS-independently (Metadata `readMetadata(CustomObject)` for
@@ -32,8 +33,8 @@ matching catches exactly this.
    - Cross-check the local Aug naming record too (`.build/*_FINAL.json`) when present.
 3. **Branch on the label match:**
    - **Exactly one org field matches the label** → it ALREADY EXISTS. Reuse that
-     org field's API name; **write it back into col D** (gated sheet write) — do
-     NOT create a new field.
+     org field's API name; **write it back into the `fullName` cell** (gated
+     sheet write) — do NOT create a new field.
    - **No org field matches** → genuinely new → AI-name per `sf-field-api-naming.mdc`
      and deploy.
    - **Label matches >1 org field** (duplicate labels, e.g. `…Reason__c` /
@@ -48,7 +49,7 @@ matching catches exactly this.
 - Label matching is a DOUBLE-CHECK, not the primary key — API name wins whenever
   present. Labels can drift/duplicate, so a label match only *reuses* an existing
   API; it never *renames* or *overwrites* an existing field.
-- Reused API names written back to col D are a **gated sheet write**
+- Reused API names written back to the `fullName` cell are a **gated sheet write**
   (`sheet-write-confirmation.mdc`): preview `cell: (blank) → TI_Fnt_…__c` and
   confirm before `--apply`.
 - All org reads are LIVE and FLS-independent; all sheet reads are LIVE

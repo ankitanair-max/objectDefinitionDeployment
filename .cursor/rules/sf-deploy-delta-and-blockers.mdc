@@ -148,12 +148,28 @@ and deploy ONLY the new (and, if explicitly requested, changed) fields.
    build phase (step 6b). SURFACE any drift to the user. Redeploying drift is a user decision, not automatic — many type changes
    (Lookup↔Formula, Checkbox↔Picklist, Text→Lookup) require delete+recreate and
    DESTROY the field's data, so never silently redeploy a drifted field.
+3c. **TRANSLATION DELTA (MANDATORY when the tab has `Field Label (EN)`).** Name
+   delta + attr_drift do not cover English. Locate EN by **header**
+   `Field Label (EN)` (same as WIP / IsDelete / `fullName`).
+   `prep_deploy.py` Step 4b runs this automatically:
+   ```
+   python scripts/translation_drift.py --rows temp_updates.json --org <ORG> --new-only
+   python scripts/generate_object_translation.py --rows temp_updates.json \
+       --org <ORG> --delta .build/translation_drift_objects.json
+   ```
+   Package **only** `NEW_TRANSLATION` (EN filled, no `en_US` in the org).
+   `CHANGED_EN` is reported, not auto-packaged. Retrieve-merge the org
+   `CustomObjectTranslation` `<Obj>__c-en_US` so sibling translations are not
+   wiped. Blank EN → WARN `MISSING_TRANSLATION`; still deploy the Japanese
+   field; **do not invent English**. Full contract:
+   `sf-object-translation-deploy.mdc`.
 4. **Report the delta before deploying:** e.g. "org already has N fields; sheet
    defines M; deploying the D new ones; X already present (skipped); Y org-only
-   (left untouched)." Keep the package limited to the delta so redeploys stay
-   fast and side-effect-free.
-5. Package + validate (check-only dry-run) the delta, then deploy for real with
-   `deploy.py --start` (the ONLY flag that writes).
+   (left untouched); T new EN translations packaged." Keep the package limited
+   to the delta so redeploys stay fast and side-effect-free.
+5. Package + validate (check-only dry-run) the delta **including any**
+   `CustomObjectTranslation:<Obj>__c-en_US` members from §3c, then deploy for
+   real with `deploy.py --start` (the ONLY flag that writes).
 6. **Log every on-the-go fix in TWO places — the value cell AND the AH note.**
    If, while packaging or deploying, you fix any attribute value (fill a blank
    `relationshipName`, supply a placeholder/real formula, resolve a collision,
@@ -235,6 +251,10 @@ against the delta), so you confirm the WHOLE object matches the source of truth.
   against the org's live metadata, and surface any drift. A field that exists by
   name but whose definition changed is a real, un-deployed change — never treat
   "exists in org" as "matches the sheet."
+- **Name-delta is also NOT enough for English.** When `Field Label (EN)` is on
+  the tab, run `translation_drift.py --new-only` (auto-run by `prep_deploy.py`
+  Step 4b). A field that exists in JA with no `en_US` COT entry is an un-deployed
+  translation. Never write EN into `CustomField.label`. Never invent English.
 - **Attribute write-back is MANDATORY, not optional.** Any field attribute you
   fix to enable a deploy (formula, `relationshipName`, API name, length/precision,
   picklist set, `referenceTo`, etc.) MUST be written back into the field's SHEET

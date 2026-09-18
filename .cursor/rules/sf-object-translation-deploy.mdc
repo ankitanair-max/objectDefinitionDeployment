@@ -1,0 +1,45 @@
+---
+description: Object-tab English is the header Field Label (EN). Future field adds are picked up by translation_drift --new-only in the same prep_deploy as the field delta. Always on for every object deploy.
+alwaysApply: true
+---
+
+# Object translation delta (header `Field Label (EN)` + new-field only)
+
+English for object/field labels is the column whose header is **`Field Label (EN)`**
+(JP `項目ラベル名 (EN)`). Locate it by **header name** (same as `WIP`, `IsDelete`,
+`fullName`). Untranslated tabs have no `Field Label (EN)` header; do not invent
+one or treat `fullName` as English. Object-level English is row 1 of that same
+column (`fetch_sheet.py` via `col_map`).
+
+Live Data Dictionary:
+https://docs.google.com/spreadsheets/d/1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ
+
+Japanese `Field Label` remains `CustomField.label`. Do **not** write `Field Label (EN)`
+into `generate_xml.py` field `<label>`.
+
+## Every object/field deploy (not a separate project)
+
+`prep_deploy.py` Step 4b always runs after field XML:
+
+1. `translation_drift.py --rows temp_updates.json --org <ORG> --new-only`
+2. `generate_object_translation.py --rows … --delta …` — retrieve the org
+   `CustomObjectTranslation` `<Obj>__c-en_US` and **merge** the new field so
+   sibling EN is not wiped.
+3. The member `CustomObjectTranslation:<Obj>__c-en_US` rides in the **same**
+   package as the CustomField delta.
+
+| Code | When | Package? |
+|---|---|---|
+| `NEW_TRANSLATION` | EN filled, no `en_US` translation in the org | **Yes — automatic** |
+| `CHANGED_EN` | Org EN ≠ sheet EN | **Report only.** Redeploy only if the user asks. |
+| `MISSING_TRANSLATION` | Deployable custom field, EN blank | WARN; deploy JA field; **do not invent English** |
+
+Honor WIP / IsDelete / `END[項目]` like every other field row. Blank EN is a WARN,
+not a Step 0 hard blocker.
+
+## Future field add (Japan team)
+
+Sheet row: JA in `Field Label`, EN in `Field Label (EN)`, API in `fullName`.
+Next `prep_deploy.py` for that tab: field name-delta creates the CustomField;
+`--new-only` marks only that row `NEW_TRANSLATION`; generate merges it into the
+org COT. Existing translations stay as they are.

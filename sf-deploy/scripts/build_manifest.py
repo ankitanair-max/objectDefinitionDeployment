@@ -10,6 +10,7 @@ so deployments are explicit, reviewable, and reproducible.
 Metadata types discovered under force-app/main/default/:
   - CustomObject      objects/<Api>/<Api>.object-meta.xml         -> member <Api>
   - CustomField       objects/<Api>/fields/<Field>.field-meta.xml -> member <Api>.<Field>
+  - CustomObjectTranslation  objectTranslations/<Obj>-<lang>/  -> member <Obj>-<lang>
   - Layout            layouts/<file>.layout-meta.xml              -> member <file>
   - FlexiPage         flexipages/<file>.flexipage-meta.xml        -> member <file>
   - PermissionSet     permissionsets/<file>.permissionset-meta.xml-> member <file>
@@ -41,6 +42,7 @@ import xml.sax.saxutils as sx
 TYPE_ORDER = [
     "CustomObject",
     "CustomField",
+    "CustomObjectTranslation",
     "RecordType",
     "Layout",
     "FlexiPage",
@@ -79,6 +81,18 @@ def discover(source_root: Path, only: set[str] | None) -> dict[str, list[str]]:
             if rt_dir.is_dir():
                 for f in sorted(rt_dir.glob("*.recordType-meta.xml")):
                     members["RecordType"].add(f"{obj}.{f.name[:-len('.recordType-meta.xml')]}")
+
+    # CustomObjectTranslation: folder objectTranslations/<Obj>-<lang>/
+    ot_dir = source_root / "objectTranslations"
+    if ot_dir.is_dir():
+        for folder in sorted(p for p in ot_dir.iterdir() if p.is_dir()):
+            member = folder.name  # e.g. TI_Fnt_Deal__c-en_US
+            obj = member.rsplit("-", 1)[0]
+            if only and obj not in only:
+                continue
+            meta = folder / f"{member}.objectTranslation-meta.xml"
+            if meta.exists():
+                members["CustomObjectTranslation"].add(member)
 
     simple = {
         "Layout": ("layouts", ".layout-meta.xml"),

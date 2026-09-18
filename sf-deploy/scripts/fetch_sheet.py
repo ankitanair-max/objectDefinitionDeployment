@@ -59,6 +59,15 @@ API_HEADER_TO_KEY = {
     "relationshiplabel": "Relationship Label",
     "relationshipname": "Relationship Name",
     "deleteconstraint": "Delete Constraint",
+    # Translation Workbench EN columns (header-driven; live on the object tab).
+    "field label (en)": "Field Label (EN)",
+    "label (en)": "Field Label (EN)",
+    "label_en": "Field Label (EN)",
+    "picklist values (en)": "Picklist Values (EN)",
+    "picklist (en)": "Picklist Values (EN)",
+    "help text (en)": "Help Text (EN)",
+    "inlinehelptext (en)": "Help Text (EN)",
+    "relationship label (en)": "Relationship Label (EN)",
 }
 # The polymorphic Column H header is long; match it by prefix (header-driven,
 # so it follows the column regardless of its physical letter).
@@ -227,6 +236,17 @@ def build_col_map(header_row: list, jp_header_row: list | None = None) -> dict[i
         # 3) Everything else maps by the English API header.
         if h in API_HEADER_TO_KEY:
             col_map[idx] = API_HEADER_TO_KEY[h]
+            continue
+        # JP header "表示ラベル (EN)" etc. when the English API-header row is blank
+        jph_l = jph.lower()
+        if "表示ラベル" in jph and "(en)" in jph_l:
+            col_map[idx] = "Field Label (EN)"
+        elif "項目ラベル名" in jph and "(en)" in jph_l:
+            col_map[idx] = "Field Label (EN)"
+        elif ("選択リスト" in jph or "picklist" in jph_l) and "(en)" in jph_l:
+            col_map[idx] = "Picklist Values (EN)"
+        elif ("ヘルプ" in jph or "help" in jph_l) and "(en)" in jph_l:
+            col_map[idx] = "Help Text (EN)"
     return col_map
 
 
@@ -248,6 +268,8 @@ def parse_object_header(grid: list[list], header_idx: int) -> dict:
                 if "オブジェクト名" in cells:
                     k = cells.index("オブジェクト名")
                     api = _first_nonblank(joined, k + 1)
+            elif c.lower() in ("object label (en)", "表示ラベル (en)", "オブジェクトラベル (en)"):
+                meta["Object Label (EN)"] = _first_nonblank(joined, j + 1)
             elif c == "説明":
                 desc = _first_nonblank(joined, j + 1)
             elif c == "レポートを許可":
@@ -303,6 +325,16 @@ def parse_tab(title: str, grid: list[list], object_api_hint: str = "") -> list[d
     helper = find_helper_cols(grid[header_idx])
     obj_meta = parse_object_header(grid, header_idx)
 
+    # Object-level English is row 1 of the Field Label (EN) column.
+    # Locate by header via col_map.
+    en_cols = [i for i, k in col_map.items() if k == "Field Label (EN)"]
+    if en_cols and grid:
+        c = en_cols[0]
+        row1 = grid[0] if grid else []
+        obj_en = norm(row1[c]) if c < len(row1) else ""
+        if obj_en and not obj_meta.get("Object Label (EN)"):
+            obj_meta["Object Label (EN)"] = obj_en
+
     # Resolve object API: header value > index-tab hint > (leave blank -> warn)
     obj_api = norm(obj_meta.get("Object API Name")) or norm(object_api_hint)
     obj_label = norm(obj_meta.get("Object Label")) or title
@@ -350,6 +382,7 @@ def parse_tab(title: str, grid: list[list], object_api_hint: str = "") -> list[d
                 "Name Field Label": rec.get("Field Label", ""),
                 "Name Field Type": rec.get("Data Type", ""),
                 "Name Field Display Format": rec.get("Type Specific Value", ""),
+                "Name Field Label (EN)": rec.get("Field Label (EN)", ""),
             }
             continue
         field_rows.append(rec)
