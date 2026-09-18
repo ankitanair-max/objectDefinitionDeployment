@@ -27,8 +27,8 @@ sys.path.insert(0, str(SCRIPTS))
 import plan_deploy  # noqa: E402
 from build_manifest import split_members  # noqa: E402
 from translation_lib import (  # noqa: E402
-    CHANGED, EN_FLAG, MISSING, NEW, SCHEMA_MISSING, content_hash,
-    save_sync_state,
+    CHANGED, CONFLICT, EN_FLAG, MISSING, NEW, SCHEMA_MISSING, content_hash,
+    make_entry, save_sync_state,
 )
 
 OBJ = "TI_Fnt_Receiving__c"
@@ -69,7 +69,7 @@ def org_cot(obj: str, lang: str, fields: dict[str, str], name_label="Receiving N
 
 def snapshot(*, org_id=ORG_A, alias="SANDBOX_A", exists=True,
              fields=(), translations=None, lang="en_US", state="ok",
-             obj=OBJ, note="") -> dict:
+             obj=OBJ, note="", object_meta=None) -> dict:
     return {
         "target": {"orgId": org_id, "alias": alias, "username": "u@example.com",
                    "instanceUrl": "https://x.my.salesforce.com",
@@ -77,6 +77,7 @@ def snapshot(*, org_id=ORG_A, alias="SANDBOX_A", exists=True,
         "lang": lang,
         "objects": {obj: {"exists": exists}},
         "fields": {obj: sorted(fields)} if exists else {},
+        "objectMeta": dict(object_meta or {}),
         "translations": dict(translations or {}),
         "translationState": state,
         "translationNote": note,
@@ -150,8 +151,21 @@ def test_second_run_is_an_empty_delta():
     assert plan["manifestMembers"] == {}
     assert plan["translationPackage"] == []
     assert plan["summary"]["empty"] is True
+    assert plan["summary"]["additiveEmpty"] is True
     assert plan["summary"]["components"] == 0
     print("  ok  second-run-is-an-empty-delta")
+
+
+def test_delete_only_plan_is_not_empty():
+    """IsDelete-only is not an additive no-op — destructive_phase must still run."""
+    rows = [meta_row(delete=["TI_Fnt_Obsolete__c"])]
+    plan = plan_for(rows, snapshot(fields=["TI_Fnt_Obsolete__c"]), lang="off")
+    assert plan["deleteMembers"] == [f"{OBJ}.TI_Fnt_Obsolete__c"]
+    assert plan["manifestMembers"] == {}
+    assert plan["summary"]["additiveEmpty"] is True
+    assert plan["summary"]["empty"] is False
+    assert plan["summary"]["deletes"] == 1
+    print("  ok  delete-only-plan-is-not-empty")
 
 
 def test_existing_field_missing_en_is_reported_not_packaged():
@@ -360,14 +374,8 @@ def test_staged_generation_honours_custom_input_and_plan():
     print("  ok  staged-generation-honours-custom-input-and-plan")
 
 
-def test_bare_generation_is_refused():
-    """No --plan ⇒ refuse: generating every sheet field is not a delta, and the
-    default output root is the staging tree, never the tracked source."""
-    import generate_xml
-
-    assert generate_xml.STAGING_DEFAULT.parts[-4:] == (
-        "staging", "force-app", "main", "default"), generate_xml.STAGING_DEFAULT
-
+def test_bare_generation_writes_all_fields():
+    """No --plan (run.py) still generates every sheet field into force-app."""
     rows = [meta_row(), field_row("TI_Fnt_Qty__c", "数量", "Quantity")]
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -377,21 +385,10 @@ def test_bare_generation_is_refused():
         cp = subprocess.run(
             [sys.executable, str(SCRIPTS / "generate_xml.py"), "--in", str(rows_path)],
             text=True, capture_output=True, cwd=str(tmp))
-        assert cp.returncode == 2, cp.stdout + cp.stderr
-        assert "no scope given" in cp.stdout
-        assert "prep_deploy.py" in cp.stdout
-        assert not (tmp / "force-app").exists()
-
-        # the escape hatch is explicit and says what it is
-        cp = subprocess.run(
-            [sys.executable, str(SCRIPTS / "generate_xml.py"), "--in", str(rows_path),
-             "--all-fields", "--source-root", str(tmp / "out/main/default")],
-            text=True, capture_output=True, cwd=str(tmp))
         assert cp.returncode == 0, cp.stdout + cp.stderr
-        assert "not for deploy" in cp.stdout
-        assert (tmp / "out/main/default/objects" / OBJ / "fields"
+        assert (tmp / "force-app/main/default/objects" / OBJ / "fields"
                 / "TI_Fnt_Qty__c.field-meta.xml").exists()
-    print("  ok  bare-generation-is-refused")
+    print("  ok  bare-generation-writes-all-fields")
 
 
 def test_validation_report_is_written_on_a_fresh_clone():
@@ -584,8 +581,9 @@ def test_single_canonical_entry_point():
     assert "CANONICAL DEPLOY ENTRY POINT" in prep
 
     run = (SCRIPTS / "run.py").read_text(encoding="utf-8")
-    assert "prep_deploy.py" in run, "run.py must delegate, not fork the pipeline"
-    assert "generate_xml.py" not in run and "build_manifest.py" not in run
+    assert "generate_xml.py" in run and "build_manifest.py" in run
+    assert 'ap.add_argument("--org"' not in run, "run.py must stay org-free"
+    assert "--spreadsheet-id" in run
     print("  ok  single-canonical-entry-point")
 
 
@@ -638,6 +636,101 @@ def test_partial_metadata_response_is_an_error():
     print("  ok  partial-metadata-response-is-an-error")
 
 
+def test_existing_object_meta_is_patched_not_rebuilt():
+    """Existing ControlledByParent must survive a history-tracked field delta."""
+    import generate_xml
+
+    org_xml = (
+        f"<records><fullName>{OBJ}</fullName>"
+        f"<label>Receiving</label>"
+        f"<sharingModel>ControlledByParent</sharingModel>"
+        f"<enableHistory>false</enableHistory>"
+        f"<nameField><type>Text</type><label>No</label></nameField>"
+        f"</records>")
+    rows = [meta_row(),
+            field_row("TI_Fnt_Hist__c", "履歴", "History",
+                      **{"Track History": "TRUE"})]
+    snap = snapshot(fields=["TI_Fnt_Parent__c"], object_meta={OBJ: org_xml})
+    plan = plan_for(rows, snap, lang="off")
+    assert plan["manifestMembers"]["CustomObject"] == [OBJ]
+    assert "enableHistory" in " ".join(plan["objectUpdates"][OBJ])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "force-app/main/default"
+        generate_xml.set_source_root(src)
+        generate_xml.process_fields(
+            generate_xml.plan_filter(rows, plan), plan=plan, snapshot=snap)
+        meta = (src / "objects" / OBJ / f"{OBJ}.object-meta.xml").read_text()
+        assert "<sharingModel>ControlledByParent</sharingModel>" in meta, meta
+        assert "<sharingModel>ReadWrite</sharingModel>" not in meta
+        assert "<enableHistory>true</enableHistory>" in meta
+        fields = sorted(p.name for p in (src / "objects" / OBJ / "fields").iterdir())
+        assert fields == ["TI_Fnt_Hist__c.field-meta.xml"]
+    print("  ok  existing-object-meta-is-patched-not-rebuilt")
+
+
+def test_approved_drift_generates_only_the_changed_field():
+    """Approved attribute drift → only that field XML and only that manifest member."""
+    import generate_xml
+    import build_manifest
+
+    rows = [meta_row(),
+            field_row("TI_Fnt_Kind__c", "種別", "Kind", dtype="Picklist",
+                      **{"Type Specific Value": "A;B"}),
+            field_row("TI_Fnt_Qty__c", "数量", "Quantity"),
+            field_row("TI_Fnt_Note__c", "備考", "Note")]
+    snap = snapshot(fields=["TI_Fnt_Kind__c", "TI_Fnt_Qty__c", "TI_Fnt_Note__c"])
+    drift = {OBJ: [{"field": "TI_Fnt_Kind__c",
+                    "reason": "type Checkbox (org) vs Picklist (sheet)",
+                    "component": "CustomField"}]}
+    plan = plan_for(rows, snap, drift=drift,
+                    include_drift={f"{OBJ}.TI_Fnt_Kind__c"}, lang="off")
+    assert plan["manifestMembers"]["CustomField"] == [f"{OBJ}.TI_Fnt_Kind__c"]
+    assert "TI_Fnt_Qty__c" not in str(plan["manifestMembers"])
+    assert "TI_Fnt_Note__c" not in str(plan["manifestMembers"])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        src = tmp / "force-app/main/default"
+        generate_xml.set_source_root(src)
+        generate_xml.process_fields(
+            generate_xml.plan_filter(rows, plan), plan=plan, snapshot=snap)
+        fields = sorted(p.name for p in (src / "objects" / OBJ / "fields").iterdir())
+        assert fields == ["TI_Fnt_Kind__c.field-meta.xml"], fields
+        man = tmp / "package.xml"
+        (tmp / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
+        rc = build_manifest.main(["--plan", str(tmp / "plan.json"),
+                                  "--out", str(man), "--project-root", str(tmp)])
+        assert rc == 0
+        xml = man.read_text(encoding="utf-8")
+        assert f"{OBJ}.TI_Fnt_Kind__c" in xml
+        assert "TI_Fnt_Qty__c" not in xml
+        assert "TI_Fnt_Note__c" not in xml
+    print("  ok  approved-drift-generates-only-the-changed-field")
+
+
+def test_parked_translation_conflict_is_a_validation_error():
+    e = make_entry(kind="ObjectField", component=OBJ, aspect="label",
+                   key="TI_Fnt_Qty__c", language="en_US",
+                   master="数量", translation="SheetEN")
+    rows = [meta_row(), field_row("TI_Fnt_Qty__c", "数量", "SheetEN")]
+    cot = {OBJ: org_cot(OBJ, "en_US", {"TI_Fnt_Qty__c": "OrgEN"})}
+    with tempfile.TemporaryDirectory() as tmp:
+        state = Path(tmp) / "sync.json"
+        state.write_text(json.dumps({
+            "orgs": {ORG_A: {"alias": "A", "entries": {
+                e["id"]: {"hash": content_hash("OldEN"), "translation": "OldEN"}}}}
+        }), encoding="utf-8")
+        plan = plan_for(rows, snapshot(fields=["TI_Fnt_Qty__c"], translations=cot),
+                        sync_state=state)
+    codes = {t["code"] for t in plan["translations"]}
+    assert CONFLICT in codes, codes
+    assert plan["validationErrors"]
+    assert all(err["code"] == CONFLICT for err in plan["validationErrors"])
+    assert "CustomObjectTranslation" not in plan["manifestMembers"]
+    print("  ok  parked-translation-conflict-is-a-validation-error")
+
+
 def test_namespace_aware_parsing_keeps_text_intact():
     from translation_lib import parse_soap
     xml = ('<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" '
@@ -663,6 +756,7 @@ def main() -> int:
         test_changed_en_is_packaged,
         test_existing_field_new_translation_is_packaged,
         test_wip_and_isdelete_are_separated,
+        test_delete_only_plan_is_not_empty,
         test_standard_fields_are_never_custom_field_members,
         test_attribute_drift_needs_an_explicit_decision,
         test_translation_for_unknown_field_is_schema_missing,
@@ -672,7 +766,7 @@ def main() -> int:
         test_plan_carries_immutable_org_id_and_scope,
         test_multiple_languages_plan_separate_members,
         test_staged_generation_honours_custom_input_and_plan,
-        test_bare_generation_is_refused,
+        test_bare_generation_writes_all_fields,
         test_validation_report_is_written_on_a_fresh_clone,
         test_manifest_contains_only_planned_members,
         test_empty_plan_yields_empty_manifest,
@@ -684,6 +778,9 @@ def main() -> int:
         test_soql_inputs_are_validated,
         test_partial_metadata_response_is_an_error,
         test_namespace_aware_parsing_keeps_text_intact,
+        test_existing_object_meta_is_patched_not_rebuilt,
+        test_approved_drift_generates_only_the_changed_field,
+        test_parked_translation_conflict_is_a_validation_error,
     ):
         fn()
     print("ALL PASSED")

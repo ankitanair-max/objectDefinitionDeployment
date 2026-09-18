@@ -7,10 +7,9 @@ import xml.etree.ElementTree as ET
 NS = "http://soap.sforce.com/2006/04/metadata"
 ET.register_namespace("", NS)
 
-# Output root. Generation is STAGED: the CLI writes under .build/staging so a
-# build never mutates the tracked force-app tree. The module-level default is
-# the legacy in-tree path, which only the ad-hoc `import generate_xml` helpers
-# rely on; every CLI run gets STAGING_DEFAULT unless --source-root says otherwise.
+# Default output root is the in-tree force-app (same as main / run.py).
+# prep_deploy.py always passes --source-root pointing at the staging tree so a
+# deploy build never mutates the tracked source.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STAGING_DEFAULT = REPO_ROOT / ".build/staging/force-app/main/default"
 _SOURCE_ROOT = Path("force-app/main/default")
@@ -136,6 +135,75 @@ def write_object_meta(
         tree.write(f, encoding="utf-8", xml_declaration=False)
         f.write(b"\n")
     print(f"Generated object metadata: {obj_api}")
+
+
+def _localname(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else str(tag)
+
+
+def _copy_ns(el: ET.Element) -> ET.Element:
+    """Copy an (possibly un-namespaced) element into the Metadata API namespace."""
+    new = ET.Element(qname(_localname(el.tag)))
+    for k, v in el.attrib.items():
+        new.set(_localname(k), v)
+    new.text = el.text
+    new.tail = el.tail
+    for child in list(el):
+        new.append(_copy_ns(child))
+    return new
+
+
+def _org_object_el(snapshot: dict | None, obj_api: str) -> ET.Element | None:
+    xml = ((snapshot or {}).get("objectMeta") or {}).get(obj_api)
+    return ET.fromstring(xml) if xml else None
+
+
+def write_patched_object_meta(
+    obj_api: str,
+    org_rec: ET.Element,
+    *,
+    enable_history: bool = False,
+    force_controlled_by_parent: bool = False,
+) -> None:
+    """Copy the org CustomObject and change only the properties this deploy needs.
+
+    Never rebuild sharingModel / nameField / enablement from a field-delta row
+    set. Existing Master-Detail fields are filtered out of that set, so
+    reconstructing would emit ``ReadWrite`` on a ``ControlledByParent`` object.
+    """
+    obj_dir = objects_root() / obj_api
+    obj_dir.mkdir(parents=True, exist_ok=True)
+    filepath = obj_dir / f"{obj_api}.object-meta.xml"
+
+    root = ET.Element(qname("CustomObject"))
+    for child in list(org_rec):
+        if _localname(child.tag) == "fullName":
+            continue
+        root.append(_copy_ns(child))
+    set_text(root, "fullName", obj_api)
+
+    sm_el = root.find(qname("sharingModel"))
+    org_sm = ((sm_el.text or "") if sm_el is not None else "").strip()
+    if force_controlled_by_parent or org_sm == "ControlledByParent":
+        set_text(root, "sharingModel", "ControlledByParent")
+
+    if enable_history:
+        set_text(root, "enableHistory", "true")
+
+    if hasattr(ET, "indent"):
+        ET.indent(root, space="    ")
+    tree = ET.ElementTree(root)
+    with filepath.open("wb") as f:
+        f.write(b'<?xml version="1.0" encoding="UTF-8"?>\n')
+        tree.write(f, encoding="utf-8", xml_declaration=False)
+        f.write(b"\n")
+    extras = []
+    if force_controlled_by_parent or org_sm == "ControlledByParent":
+        extras.append("sharingModel=ControlledByParent")
+    if enable_history:
+        extras.append("enableHistory=true")
+    note = f" ({', '.join(extras)})" if extras else ""
+    print(f"Patched existing object metadata: {obj_api}{note}")
 
 
 def ensure_object_meta(obj_api: str, obj_label: str) -> None:
@@ -702,10 +770,10 @@ def build_field_xml(row: dict) -> ET.Element | None:
 def plan_filter(rows: list[dict], plan: dict) -> list[dict]:
     """Keep only what the deployment PLAN actually deploys.
 
-    Object-meta rows are kept for every target object (the object directory has
-    to exist for its fields), but the manifest only carries the CustomObject
-    member for objects that are genuinely new, so an existing object's
-    object-meta file is generated and simply not deployed.
+    Object-meta rows are kept so Pass 1 can decide per object: new objects are
+    written from the sheet; existing objects are patched from the org snapshot
+    (and only packaged when ``objectUpdates`` says so). Existing Master-Detail
+    / Name / sharing settings must never be reconstructed from the field delta.
     """
     planned = {o: set(f) for o, f in (plan.get("newFields") or {}).items()}
     targets = {o["object"] for o in plan.get("objects") or []}
@@ -725,39 +793,57 @@ def plan_filter(rows: list[dict], plan: dict) -> list[dict]:
     return kept
 
 
-def process_fields(rows: list[dict]) -> None:
+def process_fields(rows: list[dict], *, plan: dict | None = None,
+                   snapshot: dict | None = None) -> None:
     objects_dir = objects_root()
     processed_objects: set[str] = set()
 
-    # Objects that own at least one MasterDetail field must be ControlledByParent.
-    md_objects: set[str] = set()
-    for row in rows:
-        if row.get("_type") == "object_meta":
-            continue
-        obj_api = row.get("Object API Name", row.get("_SheetName", "")).strip()
-        if obj_api and get_sf_field_type(row.get("Data Type", "").strip()) == "MasterDetail":
-            md_objects.add(obj_api)
+    existing = {o["object"] for o in (plan or {}).get("objects") or [] if o.get("exists")}
+    object_updates = set((plan or {}).get("objectUpdates") or {})
 
-    # Objects that own at least one history-tracked field MUST have object-level
-    # history enabled — otherwise the field deploy fails with "The entity: <Obj>
-    # does not have history tracking enabled". Field-level <trackHistory>true
-    # REQUIRES the CustomObject to carry <enableHistory>true</enableHistory>, so
-    # derive it from the fields regardless of the object header's 項目履歴管理 flag.
+    # MD / history derived from THIS row set. For a planned delta that is only
+    # the new fields, so existing Master-Detail fields are invisible here —
+    # existing objects must therefore be patched from the org snapshot, never
+    # reconstructed with has_master_detail=False → ReadWrite.
+    md_objects: set[str] = set()
     history_objects: set[str] = set()
     for row in rows:
         if row.get("_type") == "object_meta":
             continue
         obj_api = row.get("Object API Name", row.get("_SheetName", "")).strip()
-        if obj_api and is_truthy(row.get("Track History", "")):
+        if not obj_api:
+            continue
+        if get_sf_field_type(row.get("Data Type", "").strip()) == "MasterDetail":
+            md_objects.add(obj_api)
+        if is_truthy(row.get("Track History", "")):
             history_objects.add(obj_api)
 
-    # ---- Pass 1: write object-level metadata from header rows (rows 1-6) ----
+    # ---- Pass 1: object-level metadata ----
     for row in rows:
         if row.get("_type") != "object_meta":
             continue
         obj_api = row.get("Object API Name", "").strip()
         if not obj_api:
             continue
+
+        if plan and obj_api in existing:
+            if obj_api in object_updates:
+                rec = _org_object_el(snapshot, obj_api)
+                if rec is None:
+                    raise SystemExit(
+                        f"⛔ {obj_api} is packaged as CustomObject but the org "
+                        f"snapshot has no parent metadata to patch. Refusing to "
+                        f"reconstruct it from a field-delta row set.")
+                write_patched_object_meta(
+                    obj_api, rec,
+                    enable_history=obj_api in history_objects,
+                    force_controlled_by_parent=obj_api in md_objects,
+                )
+            else:
+                (objects_dir / obj_api).mkdir(parents=True, exist_ok=True)
+            processed_objects.add(obj_api)
+            continue
+
         write_object_meta(
             obj_api,
             row.get("Object Label", ""),
@@ -792,9 +878,13 @@ def process_fields(rows: list[dict]) -> None:
         if not field_api.endswith("__c"):
             continue
 
-        # Fallback: ensure object dir exists even if no object_meta row arrived
+        # Fallback: ensure object dir exists even if no object_meta row arrived.
+        # Never emit a reconstructed stub for an existing org object.
         if obj_api not in processed_objects:
-            ensure_object_meta(obj_api, obj_label)
+            if plan and obj_api in existing:
+                (objects_dir / obj_api / "fields").mkdir(parents=True, exist_ok=True)
+            else:
+                ensure_object_meta(obj_api, obj_label)
             processed_objects.add(obj_api)
 
         fields_dir = objects_dir / obj_api / "fields"
@@ -830,28 +920,18 @@ def main() -> int:
     ap.add_argument("--in", dest="input", default="temp_updates.json",
                     help="fetch_sheet.py rows JSON (must match the orchestrator's "
                          "--out; never assumed)")
-    ap.add_argument("--source-root", default=str(STAGING_DEFAULT),
-                    help="output root (default: the staging tree, so a run never "
-                         "dirties the tracked force-app)")
+    ap.add_argument("--source-root", default="force-app/main/default",
+                    help="output root (default: in-tree force-app, matching run.py; "
+                         "prep_deploy.py passes the staging tree)")
     ap.add_argument("--plan", default="",
                     help="deploy_plan.json — generate ONLY the planned fields")
+    ap.add_argument("--snapshot", default="",
+                    help="org_snapshot.json — required to PATCH existing CustomObject "
+                         "metadata instead of reconstructing it from the sheet")
     ap.add_argument("--all-fields", action="store_true",
-                    help="generate EVERY field in --in, ignoring the org delta. "
-                         "Only for local inspection: the output is not a "
-                         "deployable delta.")
+                    help="generate EVERY field in --in, ignoring the org delta "
+                         "(run.py / local inspection)")
     args = ap.parse_args()
-
-    if not args.plan and not args.all_fields:
-        print("⛔ no scope given. Generation is delta-driven: pass the deployment\n"
-              "   plan so only fields the org actually lacks are written.\n\n"
-              "   Normal use — the canonical command does this for you:\n"
-              "     python scripts/prep_deploy.py --org \"<ORG>\" --tabs \"<TABS>\"\n\n"
-              "   Standalone:\n"
-              "     python scripts/generate_xml.py --in <rows.json> \\\n"
-              "         --plan .build/deploy_plan.json [--source-root <dir>]\n\n"
-              "   To generate everything regardless of the org (inspection only):\n"
-              "     ... --all-fields")
-        return 2
 
     input_path = Path(args.input)
     if not input_path.exists():
@@ -865,18 +945,21 @@ def main() -> int:
 
     set_source_root(args.source_root)
 
+    plan = None
+    snapshot = None
     if args.plan:
         plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
         before = len(rows)
         rows = plan_filter(rows, plan)
         print(f"plan {args.plan}: generating {len(rows)} of {before} row(s) "
               f"({plan.get('summary', {}).get('newFields', 0)} new field(s))")
-    else:
-        print("⚠️  --all-fields: generating every sheet row with NO org delta. "
-              "This output is for inspection, not for deploy.")
+    elif args.all_fields:
+        print("⚠️  --all-fields: generating every sheet row with NO org delta.")
+    if args.snapshot:
+        snapshot = json.loads(Path(args.snapshot).read_text(encoding="utf-8"))
 
     print(f"Processing {len(rows)} row(s) → {objects_root()}")
-    process_fields(rows)
+    process_fields(rows, plan=plan, snapshot=snapshot)
     print("Custom field XML generation complete.")
     return 0
 

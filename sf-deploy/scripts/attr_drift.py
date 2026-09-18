@@ -175,6 +175,24 @@ def sheet_rows_for(object_api: str, rows: list[dict]) -> list[dict]:
     return out
 
 
+def object_meta_row(object_api: str, all_rows: list[dict]) -> dict | None:
+    """The object-meta / Name-field row that belongs to `object_api`.
+
+    Multi-object batches put every object's header in `all_rows`. Picking the
+    first Name-type row in the whole list attributes object A's Name definition
+    to object B.
+    """
+    obj_norm = (object_api or "").replace("__c", "")
+    for r in all_rows:
+        own = str(r.get("Object API Name") or "").replace("__c", "")
+        if own != obj_norm:
+            continue
+        if (r.get("Name Field Type") or r.get("Name Field Display Format")
+                or str(r.get("_type") or "").lower() in ("object_meta", "object")):
+            return r
+    return None
+
+
 def compute_drift(object_api: str, all_rows: list[dict], org: dict
                   ) -> tuple[list[dict], int, list[str]]:
     """Compare the sheet's field DEFINITIONS against the org's metadata.
@@ -282,8 +300,7 @@ def compute_drift(object_api: str, all_rows: list[dict], org: dict
     # and is not a __c custom field, so the custom-field loop above never sees it.
     # This is exactly how Receiving/ReceivingDetail shipped Name=Text while the sheet
     # declared AutoNumber. Compare it explicitly, every run.
-    meta = next((r for r in all_rows if (r.get("Name Field Type") or r.get("Name Field Display Format")
-                                     or str(r.get("_type") or "").lower() == "object")), None)
+    meta = object_meta_row(object_api, all_rows)
     onf = org.get("__nameField__")
     if meta is not None and onf is not None:
         s_nt_raw = (meta.get("Name Field Type") or "").strip()

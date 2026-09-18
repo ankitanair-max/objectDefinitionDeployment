@@ -3,24 +3,25 @@
 prep_deploy.py — THE CANONICAL DEPLOY ENTRY POINT.
 
 This is the ONE command that deploys sheet-defined objects, fields AND their
-object translations. `deploy.py` is a low-level sf wrapper (no plan, no
-translations) and `run.py` now delegates here; neither is a deployment entry
-point on its own.
+object translations. `deploy.py` is the low-level Salesforce CLI wrapper.
+`run.py` is the org-free sheet→package path (fetch → validate → generate_xml →
+build_manifest) and does not require Salesforce access.
 
     python scripts/prep_deploy.py --org "<TARGET_ORG>" \
         --tabs "<OBJECT_TABS>" --phase deploy
 
-Pipeline (one pass, in this order — nothing recomputes scope on its own):
+Pipeline (same seams as main, with field/translation delta inside them):
 
     live sheet fetch
       → static validation (hard gate)
-      → ONE target-org snapshot        (.build/org_snapshot.json)
-      → attribute drift (existing objects)
-      → deployment plan / delta        (.build/deploy_plan.json)
-      → staged metadata generation     (.build/staging/force-app)
-      → one explicit manifest FROM THE PLAN
-      → check-only deployment
-      → real deployment                (--phase deploy)
+      → EN-column gate (lang=off when no tab has Field Label (EN))
+      → org snapshot (existence + fields + CustomObject; COT only for
+        translated objects)
+      → generate_xml.py (plan-filtered fields; existing CustomObject is
+        PATCHed from the org snapshot, never reconstructed)
+      → build_manifest.py (members from the plan)
+      → deploy.py check-only
+      → deploy.py --start
       → live post-deployment verification
       → verified translation state + report refresh
 
@@ -28,7 +29,8 @@ Delta rules: a new object ships the CustomObject, all its deployable fields and
 all applicable new translations; an EXISTING object ships only fields the org
 does not have. Fields that already exist are never silently redeployed —
 attribute drift is reported and needs `--include-drift Obj__c.Field__c`. WIP
-rows are ignored; IsDelete rows stay in the separate destructive flow.
+rows are ignored; IsDelete rows stay in the separate destructive flow (a
+delete-only plan is not an empty no-op).
 
 It runs the whole chain for one OR many object tabs in a single invocation while
 keeping EVERY existing safety gate in place:
@@ -36,10 +38,7 @@ keeping EVERY existing safety gate in place:
   * validation gate            — build stops unless validate_sheet reports 0 ERRORs
   * object-existence pre-check  — live, per object (rule sf-object-existence-precheck)
   * check-only dry-run          — writes nothing to the org
-  * SHOOT deploy gate           — a REAL deploy only runs in --phase deploy, which
-                                  the assistant may invoke ONLY after the user typed
-                                  SHOOT (this script never bypasses that)
-  * live post-deploy verify     — verify_deploy.py (Tooling API, FLS-independent)
+  * live post-deploy verify     — verify_deploy.py (Tooling CustomField, FLS-independent)
   * report refresh              — build_object_report.py tab per object (mandatory)
 
 Speed: all target objects are fetched together, validated together, generated
@@ -84,8 +83,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from translation_lib import (  # noqa: E402
-    DEFAULT_LANG, normalize_lang, save_sync_state,
+    DEFAULT_LANG, has_translation_columns, normalize_lang, save_sync_state,
+    translated_tabs,
 )
+import build_destructive  # noqa: E402
 
 DEFAULT_SHEET_ID = "1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ"
 # Live Data Dictionary: https://docs.google.com/spreadsheets/d/1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ
@@ -145,6 +146,22 @@ def sf_env(args) -> dict:
     e["SF_DISABLE_LOG_FILE"] = "true"
     e["SFDX_DISABLE_LOG_FILE"] = "true"
     return e
+
+
+def translation_scope(rows: list[dict], objs: list[str], tab_of: dict[str, str],
+                      lang: str) -> tuple[str, list[str]]:
+    """Decide Translation Workbench work BEFORE the org snapshot.
+
+    Returns (effective_lang, translation_objects). ``off`` / empty objects means
+    org_snapshot must not read CustomObjectTranslation — a sandbox without the
+    Workbench can still deploy fields from untranslated tabs.
+    """
+    if lang in ("", "off"):
+        return "off", []
+    if not has_translation_columns(rows):
+        return "off", []
+    en_tabs = translated_tabs(rows)
+    return lang, [o for o in objs if tab_of.get(o) in en_tabs]
 
 
 def run(cmd: list[str], env: dict, *, capture: bool = False, check: bool = True) -> subprocess.CompletedProcess:
@@ -290,9 +307,9 @@ def verify_part(args, part: dict, i: int, total: int) -> None:
 def destructive_phase(args, plan: dict, *, start: bool) -> None:
     """Route the IsDelete set through the destructive flow.
 
-    IsDelete rows never join the additive package. They are built into
-    destructiveChanges.xml here and — because deleting a field also destroys
-    its data — only executed when `--deletes` says so explicitly.
+    IsDelete rows never join the additive package. Destructive XML is built from
+    the reviewed plan's ``deleteMembers`` — the live sheet is not re-scanned, so
+    the payload cannot diverge from what was shown.
     """
     members = plan.get("deleteMembers") or []
     if not members:
@@ -301,15 +318,8 @@ def destructive_phase(args, plan: dict, *, start: bool) -> None:
     for m in members:
         print(f"      🗑️  {m}")
     DESTRUCTIVE.parent.mkdir(parents=True, exist_ok=True)
-    cp = subprocess.run(
-        ["python3", str(SCRIPTS / "build_destructive.py"),
-         "--spreadsheet-id", plan.get("sheet", {}).get("id", "") or args.sheet_id,
-         "--tabs", ",".join(plan.get("sheet", {}).get("tabs") or []),
-         "--target-org", args.org, "--out-dir", str(DESTRUCTIVE.parent)],
-        env=sf_env(args), text=True)
-    if cp.returncode != 0:
-        raise SystemExit("⛔ could not build destructiveChanges.xml for the "
-                         "IsDelete set.")
+    api = (plan.get("target") or {}).get("apiVersion") or DEFAULT_API_VERSION
+    build_destructive.write_from_members(members, DESTRUCTIVE.parent, api)
     if not DESTRUCTIVE.exists():
         print("      all IsDelete fields are already absent from the org — no-op.")
         return
@@ -363,15 +373,26 @@ def build_phase(args, temp_path: Path) -> tuple[dict, dict[str, str]]:
                          f"See {VALIDATION_REPORT}")
     print("      validation PASS")
 
-    # 3) ONE bulk org snapshot: identity + object existence + existing fields +
-    #    the translation snapshot. Everything downstream reuses this.
-    print("\n[3/7] org snapshot (one bulk read: existence, fields, object "
-          "metadata, translations)")
-    run(["python3", str(SCRIPTS / "org_snapshot.py"),
-         "--org", args.org, "--objects", ",".join(objs), "--lang", args.lang,
-         "--on-unavailable", args.on_translation_unavailable,
-         "--out", str(SNAPSHOT)],
-        sf_env(args), capture=True)
+    rows_live = json.loads(temp_path.read_text(encoding="utf-8"))
+    effective_lang, translation_objects = translation_scope(
+        rows_live, objs, tab_of, args.lang)
+    if args.lang not in ("", "off") and effective_lang == "off":
+        print("      no Field Label (EN) on selected tabs — Translation Workbench skipped")
+    elif translation_objects:
+        print(f"      translated objects (COT snapshot): {', '.join(translation_objects)}")
+
+    # 3) org snapshot: existence + fields + CustomObject. COT only for tabs
+    #    that actually have Field Label (EN); lang=off skips Workbench entirely.
+    extra = "" if effective_lang == "off" else ", translations"
+    print(f"\n[3/7] org snapshot (existence, fields, object metadata{extra})")
+    snap_cmd = ["python3", str(SCRIPTS / "org_snapshot.py"),
+                "--org", args.org, "--objects", ",".join(objs),
+                "--lang", effective_lang,
+                "--on-unavailable", args.on_translation_unavailable,
+                "--out", str(SNAPSHOT)]
+    if effective_lang not in ("", "off"):
+        snap_cmd += ["--translation-objects", ",".join(translation_objects)]
+    run(snap_cmd, sf_env(args), capture=True)
     snapshot = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
 
     # 4) the PLAN: object/field delta + attribute drift (computed LOCALLY from
@@ -380,7 +401,7 @@ def build_phase(args, temp_path: Path) -> tuple[dict, dict[str, str]]:
     plan_cmd = ["python3", str(SCRIPTS / "plan_deploy.py"),
                 "--rows", str(temp_path), "--snapshot", str(SNAPSHOT),
                 "--sheet-id", args.sheet_id, "--tabs", args.tabs,
-                "--lang", args.lang, "--sync-state", str(SYNC_STATE),
+                "--lang", effective_lang, "--sync-state", str(SYNC_STATE),
                 "--max-components", str(args.max_components), "--out", str(PLAN)]
     if args.include_drift:
         plan_cmd += ["--include-drift", args.include_drift]
@@ -389,20 +410,35 @@ def build_phase(args, temp_path: Path) -> tuple[dict, dict[str, str]]:
     run(plan_cmd, os.environ.copy(), capture=True)
     plan = json.loads(PLAN.read_text(encoding="utf-8"))
 
-    if plan["summary"]["empty"]:
+    additive_empty = (plan["summary"].get("additiveEmpty")
+                      or not plan.get("manifestMembers"))
+    if plan["summary"].get("empty"):
         print("\n" + "-" * 72)
         print("  EMPTY DELTA — the org already matches the sheet. Nothing to build,")
         print("  nothing to deploy. (Re-running is a no-op by design.)")
         print("-" * 72)
         return plan, tab_of
 
-    # 5) staged generation — never touches the tracked force-app tree.
-    print(f"\n[5/7] generate metadata XML (staged → {STAGING_ROOT})")
     shutil.rmtree(STAGING, ignore_errors=True)
     init_staging(snapshot["target"].get("apiVersion") or DEFAULT_API_VERSION)
+
+    if additive_empty:
+        print("\n[5/7] additive package empty — IsDelete-only; skipping field generation")
+        destructive_phase(args, plan, start=False)
+        print("\n" + "-" * 72)
+        print(f"  BUILD OK — no additive package; {plan['summary']['deletes']} "
+              f"IsDelete member(s) staged.")
+        print(f"  plan: {PLAN}")
+        print("  To execute deletions, re-run with --phase deploy --deletes.")
+        print("-" * 72)
+        return plan, tab_of
+
+    # 5) staged generation — never touches the tracked force-app tree.
+    print(f"\n[5/7] generate metadata XML (staged → {STAGING_ROOT})")
     run(["python3", str(SCRIPTS / "generate_xml.py"),
          "--in", str(temp_path), "--source-root", str(STAGING_ROOT),
-         "--plan", str(PLAN)], os.environ.copy(), capture=True)
+         "--plan", str(PLAN), "--snapshot", str(SNAPSHOT)],
+        os.environ.copy(), capture=True)
 
     if plan["lang"] == "off":
         print("\n[5b] object translations: skipped (no Field Label (EN) column, "
@@ -478,20 +514,33 @@ def deploy_phase(args, temp_path: Path, plan: dict, tab_of: dict[str, str]) -> i
     print(f"  DEPLOY PHASE (REAL — writes to org)   org={args.org}")
     print("=" * 72)
 
-    if plan["summary"]["empty"]:
+    if plan["summary"].get("empty"):
         print("\n  EMPTY DELTA — nothing to deploy. The org already matches the "
               "sheet, so no package was built and no org write is attempted.")
         return 0
 
-    # REAL deploy of EVERY planned package part, in order, from the staged
-    # project. Each part is verified before the next is sent.
-    parts = package_parts(plan)
-    print(f"\n[1/5] real deploy of {len(parts)} package(s) (sf project deploy start)")
-    deploy_packages(args, parts, start=True)
+    additive_empty = (plan["summary"].get("additiveEmpty")
+                      or not plan.get("manifestMembers"))
+    parts = []
+    if not additive_empty:
+        # REAL deploy of EVERY planned package part, in order, from the staged
+        # project. Each part is verified before the next is sent.
+        parts = package_parts(plan)
+        print(f"\n[1/5] real deploy of {len(parts)} package(s) (sf project deploy start)")
+        deploy_packages(args, parts, start=True)
+    else:
+        print("\n[1/5] additive package empty — IsDelete-only; skipping field deploy")
 
     # the IsDelete set is a separate, destructive deploy (never additive)
     print("\n[2/5] IsDelete set (destructive flow)")
     destructive_phase(args, plan, start=True)
+
+    if additive_empty:
+        print("\n" + "=" * 72)
+        print(f"  ✅ DELETE-ONLY DEPLOY: {len(plan.get('deleteMembers') or [])} "
+              f"field(s) processed in {args.org}")
+        print("=" * 72)
+        return 0
 
     # MANDATORY live verification: objects, fields AND every packaged
     # translation (Tooling API for fields, readMetadata for translations)

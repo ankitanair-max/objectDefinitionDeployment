@@ -10,18 +10,18 @@ sf-deploy/
 │   ├── prep_deploy.py      ★ THE canonical entry point (whole pipeline)
 │   ├── fetch_sheet.py      1. Google Sheet → rows JSON            (your ADC creds)
 │   ├── validate_sheet.py   2. rows JSON → PASS/FAIL log           (hard gate)
-│   ├── org_snapshot.py     3. ONE bulk org read (existence, fields, object
-│   │                          metadata, translations)
+│   ├── org_snapshot.py     3. org read (existence, fields, object metadata;
+│   │                          COT only for tabs with Field Label (EN))
 │   ├── attr_drift.py       library: sheet definition vs the snapshot's object
 │   │                          metadata (also a standalone CLI for ad-hoc checks)
 │   ├── plan_deploy.py      4. the delta + drift + manifest index → deploy_plan.json
-│   ├── generate_xml.py     5. rows + plan → .build/staging/force-app/**
+│   ├── generate_xml.py     5. rows (+ optional plan) → force-app or staging
 │   ├── generate_object_translation.py
 │   │                       5b. patches the org's own CustomObjectTranslation tree
-│   ├── build_manifest.py   6. plan → package.xml (or package.part1..N.xml)
-│   ├── deploy.py           7. sf CLI deploy (check-only default), once per part
-│   ├── verify_deploy.py    8. live verification: objects, fields AND translations
-│   ├── run.py              alias for `prep_deploy.py --phase build`
+│   ├── build_manifest.py   6. plan or source scan → package.xml
+│   ├── deploy.py           7. sf CLI deploy (check-only default)
+│   ├── verify_deploy.py    8. live verification: Tooling CustomField + translations
+│   ├── run.py              org-free sheet → package (fetch, validate, generate, manifest)
 │   └── generate_*.py       layout / flexipage / permission-set generators (reused)
 ├── .build/
 │   ├── org_snapshot.json   the single target-org read

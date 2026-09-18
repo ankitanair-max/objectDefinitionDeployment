@@ -384,6 +384,14 @@ def classify(sheet_entries: list[dict], org_by_id: dict[str, dict],
     """Classify each sheet entry against live org (+ optional last-deploy hashes).
 
     conflict_policy: park | sheet-wins | org-wins
+    Parked CONFLICTS are validation errors in plan_deploy (undeployed EN must
+    not silently skip the gate).
+
+    Last-deploy hashes (``.build/translation_sync_state.json``) are OPTIONAL.
+    An absent state file never changes packaging: first contact with an org
+    classifies purely from sheet vs live org (NEW / CHANGED / UNCHANGED).
+    CONFLICT is only possible when a previous verified deploy recorded hashes
+    for this org Id.
 
     org_schema      {object: {existing field API names}} from the org snapshot.
     planned_fields  {object: {field API names this deploy creates}}.

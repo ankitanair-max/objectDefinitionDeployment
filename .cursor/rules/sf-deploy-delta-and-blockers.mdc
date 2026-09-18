@@ -213,20 +213,20 @@ and deploy ONLY the new (and, if explicitly requested, changed) fields.
 3c. **TRANSLATION DELTA (MANDATORY when the tab has `Field Label (EN)`).** Name
    delta + attr_drift do not cover English. Locate EN by **header**
    `Field Label (EN)` (same as WIP / IsDelete / `fullName`).
-   `prep_deploy.py` Step 4b runs this automatically:
-   ```
-   python scripts/translation_drift.py --rows temp_updates.json --org <ORG>
-   python scripts/generate_object_translation.py --rows temp_updates.json \
-       --org <ORG> --delta .build/translation_drift_objects.json
-   ```
+   `prep_deploy.py` classifies translations via `translation_lib.classify`
+   (the same function the optional `translation_drift.py` report CLI uses)
+   **after** the sheet fetch has decided `lang=off` when no tab has
+   `Field Label (EN)`. COT is read only for translated objects.
+   `generate_object_translation.py` then patches the org's existing
+   CustomObjectTranslation tree.
    Package **`NEW_TRANSLATION` and `CHANGED`** (EN filled and new or different
    in the org). An English label update is not destructive, unlike field-type
    drift. Pass `--new-only` to report `CHANGED` without packaging it.
    Retrieve-merge the org
    `CustomObjectTranslation` `<Obj>__c-en_US` so sibling translations are not
    wiped. Blank EN → WARN `MISSING_TRANSLATION`; still deploy the Japanese
-   field; **do not invent English**. Full contract:
-   `sf-object-translation-deploy.mdc`.
+   field; **do not invent English**. Unresolved `CONFLICT`s are validation
+   errors. Full contract: `sf-object-translation-deploy.mdc`.
 4. **Report the delta before deploying:** e.g. "org already has N fields; sheet
    defines M; deploying the D new ones; X already present (skipped); Y org-only
    (left untouched); T new EN translations packaged." Keep the package limited

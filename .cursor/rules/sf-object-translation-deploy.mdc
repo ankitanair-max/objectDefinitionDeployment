@@ -25,10 +25,12 @@ defects and must be reported as such; neither is ever packaged.
 
 A tab with no `Field Label (EN)` column is untranslated, so the translation
 step must add **zero** dependencies to that deploy: no catalog entries, no org
-session, no Metadata API call. `fetch_sheet.py` stamps every row with
-`_HasFieldLabelEN`; `has_translation_columns()` gates Step 4b, and
-`entries_from_object_rows()` drops rows from untranslated tabs. Never let an
-ordinary field deploy start needing the Translation Workbench.
+session, no Metadata API call. `prep_deploy.py` inspects `_HasFieldLabelEN`
+immediately after the sheet fetch and passes `lang=off` (plus only the
+translated objects, in a mixed batch) into `org_snapshot.py` **before** any
+CustomObjectTranslation read. `entries_from_object_rows()` also drops rows
+from untranslated tabs. Never let an ordinary field deploy start needing the
+Translation Workbench.
 
 ## Every object/field deploy (not a separate project)
 
@@ -39,28 +41,28 @@ operator step:
 python scripts/prep_deploy.py --org "<ORG>" --tabs "<TABS>" --phase deploy
 ```
 
-The translation delta is computed from the **single org snapshot**
-(`.build/org_snapshot.json`) that the orchestrator already took for the
-object/field delta, and it is recorded in the **deployment plan**
-(`.build/deploy_plan.json`) alongside the field members:
+`run.py` remains the org-free sheet→package path and does not require Salesforce.
 
-1. `org_snapshot.py` reads every target object's `CustomObjectTranslation` ONCE
- in bulk (`ceil(N/10)` readMetadata calls for N objects) and keeps the raw
- record XML.
-2. `plan_deploy.py` classifies the sheet's EN against that snapshot and writes
- the `CustomObjectTranslation:<Obj>__c-<LANG>` members into the plan.
+The translation delta is computed from the **org snapshot**
+(`.build/org_snapshot.json`) that the orchestrator took for the object/field
+delta (COT records only for objects whose tabs have `Field Label (EN)`):
+
+1. After fetch, tabs without EN force `lang=off`. Translated objects only are
+ passed to the COT snapshot.
+2. `plan_deploy.py` classifies the sheet's EN against that snapshot
+ (`translation_lib.classify` — the same function `translation_drift.py` reports
+ with) and writes the `CustomObjectTranslation:<Obj>__c-<LANG>` members.
 3. `generate_object_translation.py --snapshot … --delta <plan>` patches the new
- field into the org's OWN element tree — **no second org read per object**
- (that duplication was ~`ceil(N/10) + N` calls) — and stages the result under
- `.build/staging/force-app`.
-4. The COT member rides in the **same** plan-built package as the CustomField
- delta, and its hash is recorded in the sync state **only after**
- `verify_deploy.py` confirms the deploy landed.
+ field into the org's OWN element tree and writes under the staged project.
+4. The COT member rides in the **same** package as the CustomField delta.
+ `.build/translation_sync_state.json` is optional conflict detection keyed by
+ org Id; an absent file never changes packaging. Hashes are recorded only after
+ `verify_deploy.py` confirms the deploy landed. Unresolved `CONFLICT`s are
+ validation errors.
 
-`--lang` defaults to `en_US` and is a `prep_deploy.py` flag (`--lang off` skips
-translations entirely). Only the selected language directory
-(`objectTranslations/<Obj>__c-<LANG>`) is regenerated — other languages staged
-in the tree are left untouched.
+`--lang` defaults to `en_US` (`--lang off` skips translations). Only the
+selected language directory (`objectTranslations/<Obj>__c-<LANG>`) is
+regenerated.
 
 | Code | When | Package? |
 |---|---|---|

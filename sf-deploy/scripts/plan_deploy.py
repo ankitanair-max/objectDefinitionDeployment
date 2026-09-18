@@ -248,7 +248,8 @@ def build_plan(rows: list[dict], snapshot: dict, *, sheet_id: str, tabs: str,
     members = {k: v for k, v in members.items() if v}
 
     errors = [t for t in translations
-              if t.get("code") in {PARSE_ERROR, INVALID_LANG}]
+              if t.get("code") in {PARSE_ERROR, INVALID_LANG}
+              or (t.get("code") == CONFLICT and not t.get("package"))]
     plan = {
         "target": snapshot.get("target") or {},
         "sheet": {"id": sheet_id, "tabs": [t.strip() for t in tabs.split(",") if t.strip()]},
@@ -289,7 +290,8 @@ def build_plan(rows: list[dict], snapshot: dict, *, sheet_id: str, tabs: str,
         "components": sum(len(v) for v in members.values()),
         "packages": len(build_manifest.plan_parts(members, max_components)),
         "objectUpdates": len(object_updates),
-        "empty": not members,
+        "additiveEmpty": not members,
+        "empty": not members and not delete_members,
     }
     return plan
 
@@ -334,8 +336,11 @@ def report(plan: dict) -> None:
               f"all of them are deployed, in order:")
         for part in parts:
             print(f"      {part['file']:26} {part['components']} component(s)")
-    if s["empty"]:
+    if s.get("empty"):
         print("  → nothing to deploy: the org already matches the sheet.")
+    elif s.get("additiveEmpty"):
+        print(f"  → no additive package; {s['deletes']} IsDelete field(s) pending "
+              f"(run with --deletes to execute).")
     print("=" * 78)
 
 
@@ -379,8 +384,9 @@ def main(argv: list[str] | None = None) -> int:
     if plan["validationErrors"]:
         for e in plan["validationErrors"]:
             print(f"⛔ {e['code']} {e['id']}: {e['reason']}")
-        print("⛔ fix the sheet — unparseable EN cells / invalid language codes are "
-              "validation errors, not missing translations.")
+        print("⛔ fix the sheet — unparseable EN cells / invalid language codes / "
+              "unresolved translation CONFLICTS are validation errors, not missing "
+              "translations.")
         return 1
     return 0
 

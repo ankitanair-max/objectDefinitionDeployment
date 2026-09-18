@@ -146,8 +146,14 @@ def translation_snapshot(objs: list[str], lang: str, auth: dict) -> dict[str, st
 
 
 def take(objs: list[str], org: str, lang: str = DEFAULT_LANG,
-         on_unavailable: str = "error") -> dict:
-    """Build the whole snapshot. Raises typed errors for the caller to report."""
+         on_unavailable: str = "error",
+         translation_objects: list[str] | None = None) -> dict:
+    """Build the whole snapshot. Raises typed errors for the caller to report.
+
+    CustomObjectTranslation is read only for ``translation_objects`` (tabs that
+    actually have ``Field Label (EN)``). ``lang='off'`` skips the Workbench
+    entirely so a sandbox without it can still take a field snapshot.
+    """
     objs = sorted({soql_name(o) for o in objs if norm(o)})
     auth = org_auth(org)
     present = existing_objects(objs, org) if objs else set()
@@ -159,9 +165,16 @@ def take(objs: list[str], org: str, lang: str = DEFAULT_LANG,
     translations: dict[str, str] = {}
     translation_state = "off" if lang in ("", "off") else "ok"
     translation_note = ""
-    if translation_state == "ok" and present:
+    cot_targets: list[str] = []
+    if translation_state == "ok":
+        if translation_objects is None:
+            cot_targets = sorted(present)
+        else:
+            cot_targets = sorted({soql_name(o) for o in translation_objects
+                                  if soql_name(o) in present})
+    if cot_targets:
         try:
-            translations = translation_snapshot(sorted(present), lang, auth)
+            translations = translation_snapshot(cot_targets, lang, auth)
         except TranslationUnavailable as e:
             if on_unavailable == "error":
                 raise
@@ -215,13 +228,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--org", required=True)
     ap.add_argument("--objects", required=True, help="comma-separated object API names")
     ap.add_argument("--lang", default=DEFAULT_LANG, help="'off' to skip translations")
+    ap.add_argument("--translation-objects", default=None,
+                    help="comma-separated objects whose CustomObjectTranslation "
+                         "to read. Omit to read every existing target object. "
+                         "Pass empty (or --lang off) to skip COT entirely.")
     ap.add_argument("--on-unavailable", choices=["error", "skip"], default="error")
     ap.add_argument("--out", default=str(DEFAULT_OUT))
     args = ap.parse_args(argv)
 
     objs = [o.strip() for o in args.objects.split(",") if o.strip()]
+    if args.translation_objects is None:
+        trans_objs = None
+    else:
+        trans_objs = [o.strip() for o in args.translation_objects.split(",") if o.strip()]
     try:
-        snap = take(objs, args.org, args.lang, args.on_unavailable)
+        snap = take(objs, args.org, args.lang, args.on_unavailable, trans_objs)
     except (OrgAuthError, OrgQueryError, InvalidApiName) as e:
         print(f"❌ {e}")
         return 1

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-translation_drift.py — sheet (live catalog) vs org (live Metadata API) translation delta.
+translation_drift.py — ad-hoc REPORT of sheet vs org translation classification.
 
-Same role as attr_drift.py, for translations:
-  name-existence is not enough — compare the TRANSLATION TEXT (hash) too.
+This is NOT a deployment command and is NOT on the canonical path.
+``plan_deploy.py`` calls ``translation_lib.classify()`` (the same function)
+when building the deployment plan. Use this CLI only to print the delta
+without packaging.
 
 Tabs without a ``Field Label (EN)`` column are untranslated: the delta is empty
 and no org session / Metadata API call is made at all.

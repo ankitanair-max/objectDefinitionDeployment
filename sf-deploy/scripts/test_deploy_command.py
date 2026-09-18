@@ -406,7 +406,7 @@ def test_a_translation_only_deploy_is_not_verified_by_fields_alone():
         with patched(verify_deploy, "org_has_object", lambda obj, org: True), \
                 patched(verify_deploy, "org_fields", lambda obj, org: set()), \
                 patched(verify_deploy, "verify_translations",
-                        lambda p, org: ["TI_Fnt_Qty__c: not present"]):
+                        lambda p, org, objects=None: ["TI_Fnt_Qty__c: not present"]):
             rc = verify_deploy.main(["--target-org", "A", "--plan", str(plan_path),
                                      "--objects", OBJ])
     assert rc == 1, "an unverified translation must fail the whole verification"
@@ -471,7 +471,7 @@ def delete_plan() -> dict:
             "sheet": {"id": "SHEET123", "tabs": ["受入"]},
             "deleteMembers": [f"{OBJ}.TI_Fnt_Old__c"],
             "manifestMembers": {}, "manifestParts": [],
-            "summary": {"empty": True}}
+            "summary": {"empty": False, "additiveEmpty": True, "deletes": 1}}
 
 
 @contextlib.contextmanager
@@ -490,20 +490,18 @@ def build_destructive_files(tmp: Path) -> None:
 def test_isdelete_is_built_but_not_deleted_without_the_flag():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        built = []
+        sent = []
 
         def handler(cmd):
-            assert "build_destructive.py" in cmd[1], \
-                "must not deploy anything without --deletes"
-            built.append(cmd)
-            build_destructive_files(tmp)
+            sent.append(cmd)
             return 0
 
         with destructive_paths(tmp), fake_runner(handler):
             prep_deploy.destructive_phase(args_ns(deletes=False), delete_plan(),
                                           start=True)
-        assert built, "the IsDelete set must be built into destructiveChanges.xml"
-        assert "--target-org" in built[0]
+        xml = (tmp / "destructiveChanges.xml").read_text(encoding="utf-8")
+        assert f"{OBJ}.TI_Fnt_Old__c" in xml
+        assert sent == [], "must not deploy anything without --deletes"
 
 
 def test_isdelete_runs_the_destructive_deploy_with_the_flag():
@@ -512,16 +510,32 @@ def test_isdelete_runs_the_destructive_deploy_with_the_flag():
         sent = []
 
         def handler(cmd):
-            if "build_destructive.py" in cmd[1]:
-                build_destructive_files(tmp)
-                return 0
             sent.append(cmd)
             return 0
 
         with destructive_paths(tmp), fake_runner(handler):
             prep_deploy.destructive_phase(args_ns(deletes=True), delete_plan(),
                                           start=True)
+        xml = (tmp / "destructiveChanges.xml").read_text(encoding="utf-8")
+        assert f"{OBJ}.TI_Fnt_Old__c" in xml
         assert sent and "--pre-destructive" in sent[0] and "--start" in sent[0]
+
+
+def test_delete_only_deploy_phase_still_runs_destructive():
+    called = []
+
+    def fake_dest(args, plan, *, start):
+        called.append(start)
+
+    def no_additive(*a, **k):
+        raise AssertionError("delete-only must not send an additive package")
+
+    plan = delete_plan()
+    with patched(prep_deploy, "destructive_phase", fake_dest), \
+            patched(prep_deploy, "deploy_packages", no_additive):
+        rc = prep_deploy.deploy_phase(args_ns(deletes=True), Path("x"), plan, {})
+    assert rc == 0
+    assert called == [True]
 
 
 def test_isdelete_is_never_in_the_additive_package():
@@ -531,6 +545,68 @@ def test_isdelete_is_never_in_the_additive_package():
 
     assert plan["deleteMembers"] == [f"{OBJ}.TI_Fnt_Old__c"]
     assert f"{OBJ}.TI_Fnt_Old__c" not in plan["manifestMembers"]["CustomField"]
+
+
+def test_multi_object_name_drift_uses_matching_object_meta():
+    a, b = "A__c", "B__c"
+    rows = [
+        {"_type": "object_meta", "Object API Name": a, "Name Field Type": "Text"},
+        {"_type": "object_meta", "Object API Name": b,
+         "Name Field Type": "Autonumber", "Name Field Display Format": "B-{0000}"},
+    ]
+    org_a = attr_drift.parse_org_object(ET.fromstring(
+        f"<records><fullName>{a}</fullName>"
+        f"<nameField><type>Text</type></nameField></records>"))
+    org_b = attr_drift.parse_org_object(ET.fromstring(
+        f"<records><fullName>{b}</fullName>"
+        f"<nameField><type>AutoNumber</type>"
+        f"<displayFormat>B-{{0000}}</displayFormat></nameField></records>"))
+    drift_a, _, _ = attr_drift.compute_drift(a, rows, org_a)
+    drift_b, _, _ = attr_drift.compute_drift(b, rows, org_b)
+    assert not any(d["field"] == "Name" for d in drift_a), drift_a
+    assert not any(d["field"] == "Name" for d in drift_b), drift_b
+
+
+def test_per_part_translation_verification_ignores_later_parts():
+    e1 = make_entry(kind="ObjectField", component="A__c", aspect="label",
+                    key="F1__c", language="en_US", master="一", translation="One")
+    e2 = make_entry(kind="ObjectField", component="B__c", aspect="label",
+                    key="F2__c", language="en_US", master="二", translation="Two")
+    e1["package"] = e2["package"] = True
+    plan = {"lang": "en_US", "translations": [e1, e2],
+            "translationPackage": [e1["id"], e2["id"]]}
+
+    def only_a(objs, lang, auth):
+        return [cot_record("A__c", "en_US", {"F1__c": "One"})]
+
+    with patched(verify_deploy, "org_auth", lambda org: {"accessToken": "t"}), \
+            patched(verify_deploy, "read_object_translations", only_a):
+        assert verify_deploy.verify_translations(plan, "X", objects={"A__c"}) == []
+
+    def none(objs, lang, auth):
+        return []
+
+    with patched(verify_deploy, "org_auth", lambda org: {"accessToken": "t"}), \
+            patched(verify_deploy, "read_object_translations", none):
+        failures = verify_deploy.verify_translations(plan, "X")
+    assert len(failures) == 2
+
+
+def test_translation_scope_skips_workbench_without_en():
+    rows = [meta_row(), field_row("TI_Fnt_Qty__c")]
+    lang, objs = prep_deploy.translation_scope(rows, [OBJ], {OBJ: "t"}, "en_US")
+    assert lang == "off"
+    assert objs == []
+
+    rows_en = [{"_type": "object_meta", "_SheetName": "受入",
+                "Object API Name": OBJ, EN_FLAG: True},
+               {"_SheetName": "受入", "Object API Name": OBJ,
+                "Field API Name": "TI_Fnt_Qty__c", EN_FLAG: True,
+                "Field Label (EN)": "Quantity"}]
+    lang, objs = prep_deploy.translation_scope(
+        rows_en, [OBJ], {OBJ: "受入"}, "en_US")
+    assert lang == "en_US"
+    assert objs == [OBJ]
 
 
 def main() -> int:
@@ -558,7 +634,11 @@ def main() -> int:
         test_new_fields_are_not_reported_as_drift,
         test_isdelete_is_built_but_not_deleted_without_the_flag,
         test_isdelete_runs_the_destructive_deploy_with_the_flag,
+        test_delete_only_deploy_phase_still_runs_destructive,
         test_isdelete_is_never_in_the_additive_package,
+        test_multi_object_name_drift_uses_matching_object_meta,
+        test_per_part_translation_verification_ignores_later_parts,
+        test_translation_scope_skips_workbench_without_en,
     ):
         fn()
         print(f"  ok  {fn.__name__[5:].replace('_', '-')}")

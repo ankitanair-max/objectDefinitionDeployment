@@ -126,6 +126,25 @@ def org_has_field(target_org: str, obj: str, field: str) -> bool:
         return True  # fail-open: keep it; the deploy will surface a real error
 
 
+def write_from_members(members: list[str], out_dir: Path,
+                       api_version: str = "66.0") -> tuple[Path, Path]:
+    """Build destructive XML from planned CustomField members (Obj__c.Field__c).
+
+    Used by the orchestrator so the payload matches the reviewed plan instead of
+    re-scanning the live sheet after planning.
+    """
+    deletes = []
+    for m in members:
+        if "." not in m:
+            continue
+        obj, field = m.split(".", 1)
+        deletes.append({"object": obj, "field": field, "tab": "", "row": ""})
+    if not deletes:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        return out_dir / "destructiveChanges.xml", out_dir / "destructive_package.xml"
+    return write_manifests(deletes, out_dir, api_version)
+
+
 def write_manifests(deletes: list[dict], out_dir: Path, api_version: str) -> tuple[Path, Path]:
     members = "\n".join(f"        <members>{d['object']}.{d['field']}</members>"
                         for d in deletes)

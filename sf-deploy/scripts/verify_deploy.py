@@ -7,8 +7,10 @@ The deploy CLI log is NOT trusted on its own (a stale/dry-run log once reported
 confirms, without manual inspection, that:
 
   1. each expected object exists  (EntityDefinition), and
-  2. each expected TI_Fnt_ field of the generated package is present
-     (FieldDefinition).
+  2. each expected custom field of the generated package is present
+     (Tooling ``CustomField`` — FLS-independent; never FieldDefinition).
+  3. each packaged CustomObjectTranslation entry is live in the org
+     (filtered to ``--objects`` during per-part verification).
 
 It derives the expected object(s) + field(s) straight from the local generated
 metadata under force-app (the exact thing that was packaged), so there is no
@@ -127,7 +129,8 @@ def packaged_translations(plan: dict) -> list[dict]:
     return [t for t in (plan.get("translations") or []) if t.get("id") in ids]
 
 
-def verify_translations(plan: dict, org: str) -> list[str]:
+def verify_translations(plan: dict, org: str,
+                        objects: set[str] | None = None) -> list[str]:
     """Read CustomObjectTranslation LIVE and confirm every packaged entry.
 
     Without this, a translation-only deploy passes verification on the strength
@@ -135,8 +138,13 @@ def verify_translations(plan: dict, org: str) -> list[str]:
     sync state then records those hashes as verified. Returns a list of
     failures; empty means every packaged translation is live in the org with
     the value we deployed.
+
+    ``objects`` restricts the check to the current package part. Per-part
+    verification must not look at translations that belong to later parts.
     """
     wanted = packaged_translations(plan)
+    if objects is not None:
+        wanted = [t for t in wanted if t.get("component") in objects]
     if not wanted:
         return []
     lang = plan.get("lang") or DEFAULT_LANG
@@ -210,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
     # trusting that the package contained them.
     if plan and plan.get("translationPackage"):
         try:
-            failures = verify_translations(plan, args.target_org)
+            failures = verify_translations(plan, args.target_org, objects=only)
         except (OrgAuthError, TranslationUnavailable, MetadataApiError) as e:
             failures = [f"could not read translations: {e}"]
         count = len(plan["translationPackage"])
