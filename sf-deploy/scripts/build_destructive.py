@@ -10,7 +10,7 @@ emits:
     alongside destructiveChanges by the Metadata API.
 
 The actual delete is performed by `deploy.py`:
-    python scripts/sf_deployer.py --start \
+    python scripts/deploy.py --start \
         --pre-destructive manifest/destructiveChanges.xml \
         --package manifest/destructive_package.xml \
         --target-org "<ORG>" --test-level NoTestRun --skip-validation-gate
@@ -153,14 +153,14 @@ def write_manifests(deletes: list[dict], out_dir: Path, api_version: str) -> tup
     return dpath, ppath
 
 
-def main(argv: list[str] | None = None) -> int:
+def main() -> int:
     ap = argparse.ArgumentParser(description="Build destructiveChanges from IsDelete (AD) flag")
     ap.add_argument("--spreadsheet-id", required=True)
     ap.add_argument("--tabs", required=True, help="comma-separated object tab names")
     ap.add_argument("--target-org", default="", help="verify each field exists (Tooling API)")
     ap.add_argument("--out-dir", default="manifest")
     ap.add_argument("--api-version", default="66.0")
-    args = ap.parse_args(argv)
+    args = ap.parse_args()
 
     tabs = [t.strip() for t in args.tabs.split(",") if t.strip()]
     svc = get_sheets_service()
@@ -198,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  destructiveChanges : {dpath}")
     print(f"  empty package      : {ppath}")
     print("\nNEXT (DESTRUCTIVE — irreversible, also destroys the field data):")
-    print(f"  python scripts/sf_deployer.py --start \\")
+    print(f"  python scripts/deploy.py --start \\")
     print(f"      --pre-destructive {dpath} \\")
     print(f"      --package {ppath} \\")
     print(f"      --target-org \"<ORG>\" --test-level NoTestRun --skip-validation-gate")

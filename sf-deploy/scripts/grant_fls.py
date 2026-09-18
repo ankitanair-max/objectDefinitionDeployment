@@ -32,9 +32,6 @@ Usage:
 import argparse, json, os, sys, re, urllib.request, urllib.parse, urllib.error
 import xml.etree.ElementTree as ET
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from translation_lib import org_auth  # noqa: E402
-
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -168,12 +165,12 @@ def main():
                     help="grant on every deployed custom object starting TI_Fnt_")
     ap.add_argument("--org", required=True)
     ap.add_argument("--permset", default="SalesFrontAdmin")
+    ap.add_argument("--auth", default=".build/orgauth.json")
     ap.add_argument("--apply", action="store_true")
     a = ap.parse_args()
 
-    # Session via the supported CLI (`sf org display`) — no keychain decryption,
-    # so this works on any machine where the CLI is authorized for --org.
-    auth = org_auth(a.org)
+    os.system(f"python3 scripts/get_token.py --alias {a.org} --out {a.auth} >/dev/null 2>&1")
+    auth = json.load(open(os.path.join(ROOT, a.auth)))["result"]
     inst = auth["instanceUrl"].rstrip("/"); tok = auth["accessToken"]; ver = auth["apiVersion"]
 
     if a.all_tifnt:

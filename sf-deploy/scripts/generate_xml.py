@@ -823,7 +823,7 @@ def process_fields(rows: list[dict]) -> None:
     # (b) it was a guess rather than a sourced value from the sheet.
 
 
-def main(argv: list[str] | None = None) -> int:
+def main() -> int:
     import argparse
 
     ap = argparse.ArgumentParser(description="Generate object/field metadata XML")
@@ -839,7 +839,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="generate EVERY field in --in, ignoring the org delta. "
                          "Only for local inspection: the output is not a "
                          "deployable delta.")
-    args = ap.parse_args(argv)
+    args = ap.parse_args()
 
     if not args.plan and not args.all_fields:
         print("⛔ no scope given. Generation is delta-driven: pass the deployment\n"

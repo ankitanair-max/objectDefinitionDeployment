@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """audit_lib.py — shared live-org helpers for the deployment audit.
 
-Uses a session token from the Salesforce CLI (translation_lib.org_auth →
-`sf org display`). Provides:
+Uses a session token minted by get_token.py (.build/orgauth.json). Provides:
   - rest_query / tooling_query  (SOQL over REST / Tooling)
   - read_object_meta            (readMetadata CustomObject -> fields + actionOverrides)
   - read_flexipage              (readMetadata FlexiPage -> {field: section})

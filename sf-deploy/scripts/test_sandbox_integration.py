@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Check-only integration test against TWO differently configured sandboxes.
 
-This is the only test in the suite that touches real orgs, so it is SKIPPED
-unless both sandbox aliases are supplied:
+This is the only test that touches real orgs, so it SKIPS unless both sandbox
+aliases are supplied:
 
     SEAP_TEST_ORG_A=<alias> SEAP_TEST_ORG_B=<alias> \\
     SEAP_TEST_TABS="受入:TI_Fnt_Receiving" \\
-    python3 -m pytest sf-deploy/tests/test_sandbox_integration.py -v
+    python3 scripts/test_sandbox_integration.py
 
-It runs `deploy.py --check-only` (no org writes) against each alias and proves
-the org-dependent behaviour the org-free tests cannot:
+It runs `prep_deploy.py --phase build` (check-only; no org writes) against each
+alias and proves the org-dependent behaviour the org-free tests cannot:
 
   * the plan is computed per org: each run records its OWN immutable org Id,
     and the deltas are independent (a field present in A but not in B is
@@ -29,40 +29,29 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
-import pytest
-
-SF_DEPLOY = Path(__file__).resolve().parent.parent
-SCRIPTS = SF_DEPLOY / "scripts"
+SCRIPTS = Path(__file__).resolve().parent
+SF_DEPLOY = SCRIPTS.parent
 sys.path.insert(0, str(SCRIPTS))
 
 ORG_A = os.environ.get("SEAP_TEST_ORG_A", "")
 ORG_B = os.environ.get("SEAP_TEST_ORG_B", "")
 TABS = os.environ.get("SEAP_TEST_TABS", "")
-
-pytestmark = pytest.mark.skipif(
-    not (ORG_A and ORG_B and TABS),
-    reason="set SEAP_TEST_ORG_A, SEAP_TEST_ORG_B and SEAP_TEST_TABS to run the "
-           "two-sandbox check-only integration test")
+PLAN = SF_DEPLOY / ".build/deploy_plan.json"
 
 
 def check_only(org: str, out: Path) -> dict:
-    """Run the public command in check-only mode; return the resulting plan."""
+    """Run the canonical command in its build (check-only) phase."""
     cp = subprocess.run(
-        [sys.executable, str(SCRIPTS / "deploy.py"), "--org", org,
-         "--tabs", TABS, "--check-only", "--out", str(out / "rows.json")],
+        [sys.executable, str(SCRIPTS / "prep_deploy.py"), "--org", org,
+         "--tabs", TABS, "--phase", "build", "--out", str(out / "rows.json")],
         cwd=SF_DEPLOY, text=True, capture_output=True, timeout=1800)
     assert cp.returncode == 0, cp.stdout[-4000:] + cp.stderr[-2000:]
-    plan = json.loads((SF_DEPLOY / ".build/deploy_plan.json").read_text(encoding="utf-8"))
+    plan = json.loads(PLAN.read_text(encoding="utf-8"))
     (out / f"plan_{org}.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
     return plan
-
-
-@pytest.fixture(scope="module")
-def plans(tmp_path_factory) -> dict[str, dict]:
-    out = tmp_path_factory.mktemp("sandboxes")
-    return {ORG_A: check_only(ORG_A, out), ORG_B: check_only(ORG_B, out)}
 
 
 def test_each_sandbox_gets_its_own_plan(plans):
@@ -87,14 +76,38 @@ def test_translation_state_is_per_org(plans):
 def test_sync_state_is_bucketed_by_org_id(plans):
     state_path = SF_DEPLOY / ".build/translation_sync_state.json"
     if not state_path.exists():
-        pytest.skip("no translation sync state recorded (check-only never deploys)")
+        return                     # check-only never deploys, so it never records
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert set(state.get("orgs", {})) <= {plans[ORG_A]["target"]["orgId"],
                                           plans[ORG_B]["target"]["orgId"]}
 
 
-def test_rerunning_the_same_sandbox_is_stable(tmp_path):
-    first = check_only(ORG_A, tmp_path)
-    second = check_only(ORG_A, tmp_path)
+def test_rerunning_the_same_sandbox_is_stable(plans):
+    with tempfile.TemporaryDirectory() as td:
+        first = check_only(ORG_A, Path(td))
+        second = check_only(ORG_A, Path(td))
     assert first["manifestMembers"] == second["manifestMembers"], \
         "a check-only run must not change what the next run plans"
+
+
+def main() -> int:
+    print("test_sandbox_integration")
+    if not (ORG_A and ORG_B and TABS):
+        print("  SKIPPED — set SEAP_TEST_ORG_A, SEAP_TEST_ORG_B and "
+              "SEAP_TEST_TABS to run the two-sandbox check-only test")
+        return 0
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td)
+        plans = {ORG_A: check_only(ORG_A, out), ORG_B: check_only(ORG_B, out)}
+        for fn in (test_each_sandbox_gets_its_own_plan,
+                   test_translation_state_is_per_org,
+                   test_sync_state_is_bucketed_by_org_id,
+                   test_rerunning_the_same_sandbox_is_stable):
+            fn(plans)
+            print(f"  ok  {fn.__name__[5:].replace('_', '-')}")
+    print("ALL PASSED")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

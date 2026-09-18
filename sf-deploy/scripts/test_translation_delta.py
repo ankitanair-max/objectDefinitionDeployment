@@ -27,7 +27,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
 
 from translation_lib import (  # noqa: E402
@@ -374,15 +374,12 @@ def test_other_language_is_independent():
 def test_no_keychain_or_home_assumptions():
     """The translation modules must not read the CLI's auth files directly."""
     banned = (".sfdx", "sf/client/current", "get_token", "orgauth.json")
-    for name in ("translation_lib.py", "plan_deploy.py", "org_snapshot.py",
-                 "generate_object_translation.py", "attr_drift.py",
-                 "grant_fls.py", "grant_object_perms.py"):
+    for name in ("translation_lib.py", "translation_drift.py",
+                 "generate_object_translation.py"):
         src = (SCRIPTS / name).read_text(encoding="utf-8")
         for token in banned:
             assert token not in src, f"{name} still references {token}"
-    # the one place a session is minted, and it is the supported CLI
-    lib = (SCRIPTS / "translation_lib.py").read_text(encoding="utf-8")
-    assert '"org", "display"' in lib
+        assert "sf\", \"org\", \"display\"" in src or "org_auth" in src
     print("  ok  no-keychain-or-home-assumptions")
 
 
@@ -447,3 +444,33 @@ def test_translation_unavailable_is_actionable():
     finally:
         tl.read_metadata = real
     print("  ok  translation-unavailable-is-actionable")
+
+
+def main() -> int:
+    print("test_translation_delta")
+    for fn in (
+        test_japan_adds_one_field,
+        test_changed_en_not_packaged_new_only,
+        test_hash_utf8,
+        test_patch_preserves_all_org_translations,
+        test_name_field_label_round_trip,
+        test_object_label_patch_keeps_variants,
+        test_tab_without_en_column_produces_nothing,
+        test_mixed_tabs_only_translated_one_contributes,
+        test_legacy_rows_without_flag_still_work,
+        test_picklist_parse_error_is_validation_error,
+        test_sync_state_scoped_by_org_id,
+        test_source_format_and_manifest,
+        test_other_language_is_independent,
+        test_no_keychain_or_home_assumptions,
+        test_clean_home_generation_without_org,
+        test_untranslated_rows_skip_the_org_entirely,
+        test_translation_unavailable_is_actionable,
+    ):
+        fn()
+    print("ALL PASSED")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

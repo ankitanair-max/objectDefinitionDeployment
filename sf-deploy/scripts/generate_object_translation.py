@@ -24,7 +24,7 @@ delta says are new:
 
 Future delta (Japan adds a field to an already-translated object):
   1. They add the row (JA in Field Label, EN in Field Label (EN), API in fullName).
-  2. plan_deploy marks that field NEW_TRANSLATION in the deployment plan.
+  2. translation_drift --new-only marks that field NEW_TRANSLATION.
   3. This script patches that one field into the retrieved org translation.
 
 Usage:

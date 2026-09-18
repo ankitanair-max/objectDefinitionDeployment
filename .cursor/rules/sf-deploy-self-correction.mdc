@@ -19,12 +19,13 @@ AUTOMATED so it cannot be forgotten.
 
 ## MANDATORY quality gate — no failure without a lesson
 
-1. **Route every org-touching deploy through `scripts/deploy.py`.** Never hand-run `sf project deploy start` for the
+1. **Route every org-touching deploy through `scripts/deploy.py` /
+   `scripts/prep_deploy.py`.** Never hand-run `sf project deploy start` for the
    real deploy path — the wrappers write `.build/last_deploy_failure.json` and
    auto-append a DRAFT lesson on any non-zero exit. Ad-hoc `sf` calls bypass the
    safety net (that is exactly how the gap happened).
 2. **On failure, a DRAFT lesson is auto-written** by `scripts/log_failure.py`
-   (invoked automatically from `sf_deployer.py`). It carries `Status: DRAFT` with
+   (invoked automatically from `deploy.py`). It carries `Status: DRAFT` with
    `TODO` markers for Component / Category / Root cause / Fix / Prevention.
 3. **You MUST complete every DRAFT before claiming success.** Fill in the real
    diagnosis + the two fixes (Step 3 below) and flip `Status:` from `DRAFT` to
@@ -42,11 +43,11 @@ still covers it before running any deploy.
 
 ## On failure — run the loop
 
-Trigger whenever `scripts/deploy.py` / `scripts/sf_deployer.py`, `sf project deploy start/validate`, or any
+Trigger whenever `scripts/deploy.py`, `sf project deploy start/validate`, or any
 pipeline script exits non-zero.
 
 ### Step 1 — Capture failure context
-- `scripts/sf_deployer.py` already writes `.build/last_deploy.log` (full output) and
+- `scripts/deploy.py` already writes `.build/last_deploy.log` (full output) and
   `.build/last_deploy_failure.json` (timestamp, org, mode, extracted failures,
   candidate error codes). Read both.
 - Identify the exact component (metadata type + API name), file/line, error code,
@@ -93,6 +94,6 @@ Then run `python scripts/log_failure.py --check` and confirm it exits 0.
 - Never report a deploy as successful while `scripts/log_failure.py --check`
   exits non-zero (an unresolved `Status: DRAFT` lesson remains).
 - Never hand-run the REAL deploy (`sf project deploy start` without `--dry-run`)
-  outside `deploy.py`/`deploy.py` — that skips the auto-log safety net.
+  outside `deploy.py`/`prep_deploy.py` — that skips the auto-log safety net.
 - Re-run `scripts/validate_sheet.py` after adding a guard to confirm it now
   catches the case that failed.

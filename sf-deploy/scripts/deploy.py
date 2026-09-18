@@ -1,569 +1,323 @@
 #!/usr/bin/env python3
 """
-deploy.py — THE deployment command (sheet → plan → package → org).
+deploy.py — Safe local deploy orchestrator (wraps the Salesforce `sf` CLI).
 
-One public entry point. It computes the delta, generates only what the delta
-contains, packages it, deploys every package part, verifies the result live and
-records the verified translation state:
+This is the ONLY script that talks to a live org. It enforces a hard
+validation gate before any deploy and defaults to check-only validation.
 
-    python scripts/deploy.py --org "<TARGET_ORG>" --tabs "<OBJECT_TABS>" --start
+Safety model:
+  * Default action is `validate` (check-only, `sf project deploy validate`) —
+    it NEVER writes to the org.
+  * `--start` performs a real deploy (`sf project deploy start`). This is a
+    GATED action: the Cursor rule requires the user to type `SHOOT` before the
+    assistant runs it.
+  * A deploy is refused unless the validation report shows zero ERRORs, unless
+    `--skip-validation-gate` is explicitly passed.
 
-Modes (all of them run the same plan, so a check-only run and the real deploy
-can never disagree about scope):
+Usage:
+  # check-only (safe, default)
+  python scripts/deploy.py --package manifest/package.xml --target-org "ERP DEV 02"
 
-    --plan          plan only: fetch, validate, snapshot, delta. No files built,
-                    no org writes.
-    (default)       check-only: additionally generate, package and validate the
-                    package(s) against the org. Still no org writes.
-    --start         the real deploy: every package part in order, then live
-                    verification, destructive deletes (with --deletes), verified
-                    translation state and the per-object report.
+  # real deploy (gated by SHOOT)
+  python scripts/deploy.py --start --package manifest/package.xml \
+      --target-org "ERP DEV 02" --test-level RunLocalTests
 
-Pipeline (nothing recomputes scope on its own — the plan is the only scope):
-
-    live sheet fetch
-      → static validation (hard gate)
-      → ONE target-org snapshot   (.build/org_snapshot.json: existence, fields,
-                                   CustomObject metadata, translations)
-      → attribute drift, computed locally from that snapshot
-      → deployment plan / delta   (.build/deploy_plan.json, incl. the manifest
-                                   index: every package part that will deploy)
-      → staged generation         (.build/staging/force-app)
-      → manifest FROM THE PLAN    (package.xml, or package.part1..N.xml)
-      → check-only deploy of every part
-      → real deploy of every part, each verified before the next
-      → destructive deploy of the IsDelete set (--start --deletes)
-      → live verification (objects, fields AND translations)
-      → verified translation state + report refresh
-
-Delta rules: a new object ships the CustomObject, all its deployable fields and
-all applicable new translations; an EXISTING object ships only fields the org
-does not have, plus its CustomObject when a new field forces an object-level
-change (history tracking, Master-Detail sharing). Fields that already exist are
-never silently redeployed — attribute drift is reported and needs
-`--include-drift Obj__c.Field__c`. WIP rows are ignored. IsDelete rows never
-enter the additive package; they go through the destructive flow.
-
-The pipeline stages are imported as modules (org_snapshot, plan_deploy,
-generate_xml, generate_object_translation, build_manifest, sf_deployer,
-verify_deploy, build_destructive), not shelled out one by one. The two steps
-that keep a separate process are the ones needing different credentials in the
-environment: the Google-authenticated sheet fetch and the report refresh.
-
-Re-running with no sheet changes is a no-op by design: the plan comes out
-empty, no package is built and no org write is attempted.
-
-Authentication is whatever the Salesforce CLI is already authorized with for
-`--org`; `--sf-home` / `--xdg-data-home` are opt-in sandbox overrides.
+  # delete-only deploy
+  python scripts/deploy.py --start --pre-destructive manifest/destructiveChanges.xml \
+      --package manifest/package.xml --target-org "ERP DEV 02"
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import build_destructive  # noqa: E402
-import build_manifest  # noqa: E402
-import generate_object_translation  # noqa: E402
-import generate_xml  # noqa: E402
-import org_snapshot  # noqa: E402
-import plan_deploy  # noqa: E402
-import sf_deployer  # noqa: E402
-import validate_sheet  # noqa: E402
-import verify_deploy  # noqa: E402
-from translation_lib import (  # noqa: E402
-    DEFAULT_LANG, MetadataApiError, OrgAuthError, TranslationUnavailable,
-    normalize_lang, save_sync_state,
-)
-
-DEFAULT_SHEET_ID = "1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ"
-# Live Data Dictionary: https://docs.google.com/spreadsheets/d/1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ
-# Anchored on this file, so the command behaves the same from any cwd.
-SCRIPTS = Path(__file__).resolve().parent
-ROOT = SCRIPTS.parent
-# Generation is STAGED: a build never mutates the tracked force-app tree, and a
-# stale artifact from an earlier run can never leak into a package.
-STAGING = ROOT / ".build/staging"
-STAGING_ROOT = STAGING / "force-app/main/default"
-STAGING_TRANSLATIONS = STAGING_ROOT / "objectTranslations"
-VALIDATION_REPORT = ROOT / ".build/validation_report.json"
-SNAPSHOT = ROOT / ".build/org_snapshot.json"
-PLAN = ROOT / ".build/deploy_plan.json"
-SYNC_STATE = ROOT / ".build/translation_sync_state.json"
-MANIFEST_DIR = STAGING / "manifest"
-PACKAGE = MANIFEST_DIR / "package.xml"
-DESTRUCTIVE = MANIFEST_DIR / "destructiveChanges.xml"
-DESTRUCTIVE_PACKAGE = MANIFEST_DIR / "destructive_package.xml"
-LAST_DEPLOY_LOG = ROOT / ".build/last_deploy.log"
-DEFAULT_API_VERSION = "60.0"
+VALID_TEST_LEVELS = {"NoTestRun", "RunSpecifiedTests", "RunLocalTests", "RunAllTestsInOrg"}
 
 
-class DeployError(RuntimeError):
-    """A pipeline stage failed; the command stops and reports it."""
+def sf_available() -> str | None:
+    return shutil.which("sf") or shutil.which("sfdx")
 
 
-# --------------------------------------------------------------------------- #
-# environment. Org steps inherit the environment by default, so whatever the
-# Salesforce CLI is already authorized with works — laptop, build agent or
-# container. `--sf-home` / `--xdg-data-home` are opt-in overrides for sandboxes
-# that cannot let the CLI write into the real HOME.
-# --------------------------------------------------------------------------- #
-def google_env(args) -> dict:
-    e = os.environ.copy()
-    if args.google_home:
-        e["HOME"] = args.google_home
-        e.pop("XDG_DATA_HOME", None)
-    return e
+def list_connected_orgs() -> list[dict]:
+    """Return connected (authenticated) orgs from `sf org list --json`.
 
-
-def sf_env(args) -> dict:
-    e = os.environ.copy()
-    if args.sf_home:
-        e["HOME"] = args.sf_home
-    if args.xdg_data_home:
-        e["XDG_DATA_HOME"] = args.xdg_data_home
-    e["SF_DISABLE_LOG_FILE"] = "true"
-    e["SFDX_DISABLE_LOG_FILE"] = "true"
-    return e
-
-
-class sf_environment:
-    """Apply the sf-CLI env overrides around an in-process stage."""
-
-    def __init__(self, args):
-        self.env = sf_env(args)
-
-    def __enter__(self):
-        self.saved = os.environ.copy()
-        os.environ.update(self.env)
-        return self
-
-    def __exit__(self, *exc):
-        os.environ.clear()
-        os.environ.update(self.saved)
-        return False
-
-
-def stage(module, argv: list[str], what: str) -> None:
-    """Run one pipeline module in-process; a non-zero return stops the run."""
-    print(f"  · {module.__name__} {' '.join(argv)}")
-    rc = module.main(argv)
-    if rc != 0:
-        raise DeployError(f"{what} failed (exit {rc}) — see the output above.")
-
-
-def init_staging(api_version: str = DEFAULT_API_VERSION) -> None:
-    """A minimal SFDX project around the staged source, so the CLI resolves the
-    manifest against the STAGED tree and not the working copy."""
-    STAGING_ROOT.mkdir(parents=True, exist_ok=True)
-    MANIFEST_DIR.mkdir(parents=True, exist_ok=True)
-    (STAGING / "sfdx-project.json").write_text(json.dumps({
-        "packageDirectories": [{"path": "force-app", "default": True}],
-        "namespace": "",
-        "sfdcLoginUrl": "https://test.salesforce.com",
-        "sourceApiVersion": api_version,
-    }, indent=2) + "\n", encoding="utf-8")
-
-
-# --------------------------------------------------------------------------- #
-# sheet input
-# --------------------------------------------------------------------------- #
-def patch_object_apis(temp_path: Path) -> dict[str, str]:
-    """Ensure object API names end with __c. Return {objectApi: sourceTab}."""
-    rows = json.loads(temp_path.read_text(encoding="utf-8"))
-    tab_of: dict[str, str] = {}
-    for r in rows:
-        api = str(r.get("Object API Name") or "").strip()
-        if api and not api.endswith("__c"):
-            api = api + "__c"
-            r["Object API Name"] = api
-        tab = str(r.get("_SheetName") or "").strip()
-        if api and tab:
-            tab_of.setdefault(api, tab)
-    temp_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
-    return tab_of
-
-
-def object_list(temp_path: Path) -> list[str]:
-    rows = json.loads(temp_path.read_text(encoding="utf-8"))
-    objs = []
-    for r in rows:
-        if r.get("_type") == "object_meta":
-            api = str(r.get("Object API Name") or "").strip()
-            if api and api not in objs:
-                objs.append(api)
-    return objs
-
-
-def validation_error_count() -> int:
-    """ERROR count from the validation report.
-
-    Raises instead of returning a sentinel when the report is absent or
-    unreadable: "we could not read the gate" is a different situation from
-    "the gate counted N errors", and reporting it as a count produced the
-    nonsensical "-1 ERROR(s)" message.
+    Each item: {alias, username, isDefault, status, instanceUrl}.
     """
-    if not VALIDATION_REPORT.exists():
-        raise DeployError(
-            f"validate_sheet.py wrote no report at {VALIDATION_REPORT} — the "
-            f"validation gate could not be evaluated, so the run stops. Check "
-            f"the validator output above (it exited before writing).")
     try:
-        data = json.loads(VALIDATION_REPORT.read_text(encoding="utf-8"))
-        return int(data["counts"]["ERROR"])
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
-        raise DeployError(f"validation report {VALIDATION_REPORT} is unreadable "
-                          f"({e}) — cannot confirm the gate passed.")
+        out = subprocess.run(["sf", "org", "list", "--json"],
+                             capture_output=True, text=True, timeout=60)
+        data = json.loads(out.stdout or "{}")
+    except Exception as e:
+        print(f"⚠️  could not list orgs: {e}")
+        return []
+
+    result = data.get("result", {}) or {}
+    raw: list[dict] = []
+    for bucket in ("nonScratchOrgs", "scratchOrgs", "devHubs", "sandboxes", "other"):
+        raw.extend(result.get(bucket, []) or [])
+
+    orgs: dict[str, dict] = {}
+    for o in raw:
+        username = o.get("username", "")
+        if not username:
+            continue
+        status = str(o.get("connectedStatus") or o.get("status") or "").strip()
+        # keep only usable (connected) orgs; drop expired/errored auths
+        if status and status.lower() not in {"connected", "active"}:
+            continue
+        orgs[username] = {
+            "alias": o.get("alias") or "",
+            "username": username,
+            "isDefault": bool(o.get("isDefaultUsername")),
+            "status": status or "Connected",
+            "instanceUrl": o.get("instanceUrl", ""),
+        }
+    # stable order: default first, then alias/username
+    return sorted(orgs.values(),
+                  key=lambda x: (not x["isDefault"], x["alias"] or x["username"]))
 
 
-# --------------------------------------------------------------------------- #
-# stages
-# --------------------------------------------------------------------------- #
-def plan_stage(args, temp_path: Path) -> tuple[dict, dict[str, str]]:
-    """Sheet → validation → ONE org snapshot → local drift → the plan."""
+def print_org_table(orgs: list[dict]) -> None:
     print("=" * 72)
-    print(f"  PLAN   org={args.org}   tabs={args.tabs}")
+    print("  CONNECTED SALESFORCE ORGS")
     print("=" * 72)
-    (ROOT / ".build").mkdir(parents=True, exist_ok=True)
-
-    print("\n[1/4] fetch sheet tabs (live)")
-    cp = subprocess.run(
-        ["python3", str(SCRIPTS / "fetch_sheet.py"),
-         "--spreadsheet-id", args.sheet_id, "--tabs", args.tabs,
-         "--out", str(temp_path)],
-        env=google_env(args), text=True)
-    if cp.returncode != 0:
-        raise DeployError("fetch_sheet.py failed — the sheet is the source of "
-                          "truth, so the run stops rather than using stale rows.")
-    tab_of = patch_object_apis(temp_path)
-    objs = object_list(temp_path)
-    if not objs:
-        raise DeployError("no objects parsed from the sheet — check --tabs names.")
-    print(f"      objects: {', '.join(objs)}")
-
-    # validation gate (with the LIVE referenceTo org-existence check)
-    print("\n[2/4] validate (gate: 0 errors, incl. live referenceTo org check)")
-    with sf_environment(args):
-        validate_sheet.main(["--in", str(temp_path), "--json", str(VALIDATION_REPORT),
-                             "--target-org", args.org])
-    errs = validation_error_count()
-    if errs != 0:
-        raise DeployError(f"validation reports {errs} ERROR(s) — fix the sheet "
-                          f"before deploying. See {VALIDATION_REPORT}")
-    print("      validation PASS")
-
-    # ONE bulk org read: existence + fields + CustomObject metadata + translations
-    print("\n[3/4] org snapshot (one bulk read: existence, fields, object "
-          "metadata, translations)")
-    with sf_environment(args):
-        stage(org_snapshot,
-              ["--org", args.org, "--objects", ",".join(objs), "--lang", args.lang,
-               "--on-unavailable", args.on_translation_unavailable,
-               "--out", str(SNAPSHOT)],
-              "org snapshot")
-    snapshot = org_snapshot.load(SNAPSHOT)
-
-    # the PLAN: object/field delta + local attribute drift + translation delta
-    # + the manifest index (which package parts exist).
-    print("\n[4/4] deployment plan (delta; attribute drift computed from the snapshot)")
-    plan_argv = ["--rows", str(temp_path), "--snapshot", str(SNAPSHOT),
-                 "--sheet-id", args.sheet_id, "--tabs", args.tabs,
-                 "--lang", args.lang, "--sync-state", str(SYNC_STATE),
-                 "--max-components", str(args.max_components), "--out", str(PLAN)]
-    if args.include_drift:
-        plan_argv += ["--include-drift", args.include_drift]
-    stage(plan_deploy, plan_argv, "deployment plan")
-    plan = json.loads(PLAN.read_text(encoding="utf-8"))
-    return plan, tab_of
-
-
-def generate_stage(args, temp_path: Path, plan: dict, snapshot: dict) -> list[dict]:
-    """Staged generation + the manifest. Returns the manifest index (parts)."""
-    print(f"\n[build] generate metadata XML (staged → {STAGING_ROOT})")
-    shutil.rmtree(STAGING, ignore_errors=True)
-    init_staging((snapshot.get("target") or {}).get("apiVersion") or DEFAULT_API_VERSION)
-    stage(generate_xml,
-          ["--in", str(temp_path), "--source-root", str(STAGING_ROOT),
-           "--plan", str(PLAN)], "metadata generation")
-
-    if plan["lang"] == "off":
-        print("[build] object translations: disabled (--lang off)")
-    elif plan["translationState"] != "ok":
-        print(f"[build] object translations: {plan['translationState']} — "
-              f"{plan['translationNote'][:160]}")
-    elif not plan["translationPackage"]:
-        print("[build] object translations: nothing new to translate")
-    else:
-        print(f"[build] object translations ({plan['lang']}, "
-              f"{len(plan['translationPackage'])} new) — patched onto the org's "
-              f"own translation tree")
-        stage(generate_object_translation,
-              ["--rows", str(temp_path), "--snapshot", str(SNAPSHOT),
-               "--lang", plan["lang"], "--delta", str(PLAN),
-               "--on-unavailable", args.on_translation_unavailable,
-               "--out-root", str(STAGING_TRANSLATIONS)], "translation generation")
-
-    print("\n[build] manifest from the plan")
-    stage(build_manifest,
-          ["--plan", str(PLAN), "--project-root", str(STAGING),
-           "--max-components", str(args.max_components), "--out", str(PACKAGE)],
-          "manifest build")
-    parts = package_parts(plan)
-    for p in parts:
-        if not p["path"].exists():
-            raise DeployError(f"planned package {p['path']} was not written — "
-                              f"the manifest and the plan disagree.")
-    return parts
-
-
-def package_parts(plan: dict) -> list[dict]:
-    """Every package file the plan says must be deployed, in order."""
-    parts = plan.get("manifestParts") or []
-    if not parts and plan.get("manifestMembers"):
-        parts = [{"file": "package.xml", "members": plan["manifestMembers"],
-                  "components": sum(len(v) for v in plan["manifestMembers"].values())}]
-    return [{**p, "path": MANIFEST_DIR / Path(p["file"]).name} for p in parts]
-
-
-def deploy_packages(args, parts: list[dict], *, start: bool) -> None:
-    """Deploy EVERY package part, in order.
-
-    A split plan that deploys only `package.xml` silently drops every component
-    in parts 2..N — the whole point of splitting is that all parts ship.
-    """
-    mode = "real deploy" if start else "check-only"
-    for i, part in enumerate(parts, 1):
-        label = f"{part['file']} ({part['components']} component(s))"
-        print(f"\n[{mode} {i}/{len(parts)}] {label}")
-        argv = ["--package", str(part["path"]), "--target-org", args.org,
-                "--test-level", args.test_level,
-                "--validation-report", str(VALIDATION_REPORT),
-                "--project-dir", str(STAGING), "--log", str(LAST_DEPLOY_LOG)]
-        if start:
-            argv.append("--start")
-        with sf_environment(args):
-            rc = sf_deployer.main(argv)
-        if rc != 0:
-            raise DeployError(
-                f"{mode} of {part['file']} failed (exit {rc}). "
-                + (f"Parts {i + 1}..{len(parts)} were NOT deployed."
-                   if start and i < len(parts) else ""))
-        if start:
-            first = (LAST_DEPLOY_LOG.read_text(encoding="utf-8").splitlines() or [""])[0]
-            if "deploy start" not in first or "--dry-run" in first:
-                raise DeployError(f"deploy log is not a real 'deploy start' run:\n  {first}")
-            verify_part(args, part, i, len(parts))
-
-
-def verify_part(args, part: dict, i: int, total: int) -> None:
-    """Confirm a part landed before the next one is sent."""
-    objs = sorted({m.split(".")[0] for vals in part["members"].values() for m in vals})
-    objs = [o.split("-")[0] for o in objs]
-    with sf_environment(args):
-        rc = verify_deploy.main(["--target-org", args.org, "--plan", str(PLAN),
-                                 "--objects", ",".join(sorted(set(objs)))])
-    if rc != 0:
-        raise DeployError(
-            f"part {i}/{total} ({part['file']}) did NOT fully land — stopping "
-            f"before the remaining parts so the org is not left half-updated.")
-
-
-def destructive_stage(args, plan: dict, *, start: bool) -> None:
-    """Route the IsDelete set through the destructive flow.
-
-    IsDelete rows never join the additive package. They are built into
-    destructiveChanges.xml here and — because deleting a field also destroys
-    its data — only executed when `--deletes` says so explicitly.
-    """
-    members = plan.get("deleteMembers") or []
-    if not members:
-        return
-    print(f"\n[deletes] {len(members)} field(s) flagged IsDelete on the sheet")
-    for m in members:
-        print(f"      🗑️  {m}")
-    tabs = ",".join(plan.get("sheet", {}).get("tabs") or [])
-    MANIFEST_DIR.mkdir(parents=True, exist_ok=True)
-    with sf_environment(args):
-        rc = build_destructive.main(
-            ["--spreadsheet-id", plan.get("sheet", {}).get("id", ""), "--tabs", tabs,
-             "--target-org", args.org, "--out-dir", str(MANIFEST_DIR)])
-    if rc != 0:
-        raise DeployError("could not build destructiveChanges.xml for the "
-                          "IsDelete set.")
-    if not DESTRUCTIVE.exists():
-        print("      all IsDelete fields are already absent from the org — no-op.")
-        return
-    if not args.deletes:
-        print("      ⚠️  NOT deleted: deleting a field destroys its data, so the "
-              "destructive deploy runs only with --deletes.")
-        return
-    argv = ["--package", str(DESTRUCTIVE_PACKAGE),
-            "--pre-destructive", str(DESTRUCTIVE),
-            "--target-org", args.org, "--test-level", args.test_level,
-            "--validation-report", str(VALIDATION_REPORT),
-            "--project-dir", str(STAGING), "--log", str(LAST_DEPLOY_LOG)]
-    if start:
-        argv.append("--start")
-    print(f"\n[deletes] {'DESTRUCTIVE deploy' if start else 'check-only'} "
-          f"of {len(members)} field deletion(s)")
-    with sf_environment(args):
-        rc = sf_deployer.main(argv)
-    if rc != 0:
-        raise DeployError("the destructive deploy failed — the additive deploy "
-                          "already landed; investigate before retrying.")
-
-
-def persist_sync_state(plan: dict) -> None:
-    """Record the deployed translation hashes — only AFTER live verification.
-
-    Writing them earlier would make a failed deploy look "already deployed" on
-    the next run and silently drop the translation from the delta. The state is
-    keyed by the target org's immutable Id, so it can never be read back
-    against a different sandbox.
-    """
-    packaged = [t for t in plan.get("translations") or [] if t.get("package")]
-    org_id = (plan.get("target") or {}).get("orgId", "")
-    if not packaged or not org_id:
-        return
-    save_sync_state(packaged, (plan.get("target") or {}).get("alias", ""),
-                    SYNC_STATE, org_id=org_id)
-    print(f"      recorded {len(packaged)} verified translation hash(es) for org "
-          f"{org_id} → {SYNC_STATE}")
-
-
-def report_stage(args, plan: dict, tab_of: dict[str, str]) -> None:
-    """Refresh the per-object report tab (mandatory, non-fatal if it errors)."""
-    for o in [obj["object"] for obj in plan["objects"]]:
-        cmd = ["python3", str(SCRIPTS / "build_object_report.py"),
-               "--object-api", o, "--sheet-tab", tab_of.get(o, ""),
-               "--sheet-id", args.sheet_id, "--target-org", args.org,
-               "--fields-dir", str(STAGING_ROOT / "objects" / o / "fields"),
-               "--workbook", args.workbook]
-        if args.sf_home:
-            cmd += ["--sf-home", args.sf_home]
-        if args.xdg_data_home:
-            cmd += ["--xdg-data-home", args.xdg_data_home]
-        if subprocess.run(cmd, env=google_env(args), text=True).returncode != 0:
-            print(f"      ⚠️  report refresh failed for {o} (deploy still verified).")
-
-
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(
-        description="Deploy sheet-defined objects, fields and translations")
-    ap.add_argument("--org", required=True, help="target org alias/username")
-    ap.add_argument("--tabs", required=True, help="comma-separated object tab names")
-    mode = ap.add_mutually_exclusive_group()
-    mode.add_argument("--plan", dest="plan_only", action="store_true",
-                      help="compute the delta only: no files built, no org writes")
-    mode.add_argument("--check-only", action="store_true",
-                      help="default: build + validate the package(s) against the "
-                           "org without writing")
-    mode.add_argument("--start", action="store_true",
-                      help="REAL deploy: every package part, verified live")
-    ap.add_argument("--deletes", action="store_true",
-                    help="also execute the IsDelete set (destructive: deleting a "
-                         "field destroys its data)")
-    ap.add_argument("--test-level", default="NoTestRun")
-    ap.add_argument("--sheet-id", default=DEFAULT_SHEET_ID)
-    ap.add_argument("--out", default=str(ROOT / "temp_updates.json"),
-                    help="where the fetched sheet rows are written")
-    ap.add_argument("--workbook", default="reports/Object_Deployment_Report.xlsx")
-    ap.add_argument("--lang", default=DEFAULT_LANG,
-                    help="Translation Workbench language for the object "
-                         "translations (default en_US; 'off' to skip them)")
-    ap.add_argument("--include-drift", default="",
-                    help="comma-separated Obj__c.Field__c whose ATTRIBUTE DRIFT "
-                         "you have reviewed and want redeployed. Drift is never "
-                         "packaged automatically: some type changes require "
-                         "delete+recreate and destroy the field's data.")
-    ap.add_argument("--max-components", type=int, default=9000,
-                    help="component cap per package; larger plans split "
-                         "deterministically into package.partN.xml and EVERY "
-                         "part is deployed, in order")
-    ap.add_argument("--on-translation-unavailable", choices=["error", "skip"],
-                    default="error",
-                    help="org without Translation Workbench / --lang active: "
-                         "fail with an actionable message (default), or skip "
-                         "translations and deploy the fields only")
-    ap.add_argument("--google-home", default=os.environ.get("SEAP_GOOGLE_HOME", ""),
-                    help="override HOME for the Google (ADC) steps; default: inherit")
-    ap.add_argument("--sf-home", default=os.environ.get("SEAP_SF_HOME", ""),
-                    help="override HOME for the sf CLI steps; default: inherit, "
-                         "i.e. use however this machine authorized the CLI")
-    ap.add_argument("--xdg-data-home", default=os.environ.get("SEAP_XDG_DATA_HOME", ""),
-                    help="override XDG_DATA_HOME for the sf CLI steps; default: inherit")
-    args = ap.parse_args(argv)
-
-    if args.lang != "off":
-        lang, lang_err = normalize_lang(args.lang)
-        if lang_err:
-            print(f"❌ --lang: {lang_err} — use a Salesforce Translation Workbench "
-                  f"code such as en_US, ja, zh_CN, or 'off'.")
-            return 2
-        args.lang = lang
-
-    temp_path = Path(args.out)
-    try:
-        plan, tab_of = plan_stage(args, temp_path)
-
-        if plan["summary"]["empty"] and not plan.get("deleteMembers"):
-            print("\n  EMPTY DELTA — the org already matches the sheet. Nothing to "
-                  "build, nothing to deploy. (Re-running is a no-op by design.)")
-            return 0
-        if args.plan_only:
-            print(f"\n  plan only → {PLAN}. Re-run with --start to deploy it.")
-            return 0
-
-        snapshot = org_snapshot.load(SNAPSHOT)
-        parts = generate_stage(args, temp_path, plan, snapshot) \
-            if not plan["summary"]["empty"] else []
-
-        if not args.start:
-            deploy_packages(args, parts, start=False)
-            destructive_stage(args, plan, start=False)
-            print("\n" + "-" * 72)
-            print(f"  CHECK-ONLY OK — {len(parts)} package(s) validated against "
-                  f"{args.org}; nothing was written.")
-            print(f"  plan: {PLAN}")
-            print("  To deploy for real, re-run with --start (same --tabs/--org).")
-            print("-" * 72)
-            return 0
-
-        # real deploy: every part, each verified before the next
-        deploy_packages(args, parts, start=True)
-        destructive_stage(args, plan, start=True)
-
-        print("\n[verify] live verification (objects, fields AND translations)")
-        objs = ",".join(o["object"] for o in plan["objects"])
-        with sf_environment(args):
-            rc = verify_deploy.main(["--target-org", args.org, "--plan", str(PLAN),
-                                     "--objects", objs])
-        if rc != 0:
-            raise DeployError("VERIFICATION FAILED — the deploy did NOT fully "
-                              "land. Do not report success; investigate first.")
-
-        print("\n[state] persist verified translation state")
-        persist_sync_state(plan)
-
-        print("\n[report] refresh deployment report tabs")
-        report_stage(args, plan, tab_of)
-
-        print("\n" + "=" * 72)
-        print(f"  ✅ DEPLOYED & VERIFIED: {len(plan['objects'])} object(s), "
-              f"{len(parts)} package(s) confirmed in {args.org}")
+    if not orgs:
+        print("  (none) — connect one:  sf org login web --alias \"<ORG>\"")
         print("=" * 72)
-        return 0
-    except DeployError as e:
-        print(f"\n⛔ {e}")
+        return
+    for i, o in enumerate(orgs, 1):
+        star = " *default" if o["isDefault"] else ""
+        alias = o["alias"] or "(no alias)"
+        print(f"  [{i}] {alias:24} {o['username']:34} {o['status']}{star}")
+        if o["instanceUrl"]:
+            print(f"      {o['instanceUrl']}")
+    print("=" * 72)
+
+
+def resolve_target_org(explicit: str, orgs: list[dict]) -> str | None:
+    """Resolve to a connected org. Requires an explicit selection — NEVER
+    silently falls back to the configured default (deploy quality gate)."""
+    if not explicit:
+        return None
+    # accept selection by index, alias, or username
+    if explicit.isdigit():
+        idx = int(explicit)
+        if 1 <= idx <= len(orgs):
+            return orgs[idx - 1]["alias"] or orgs[idx - 1]["username"]
+        return None
+    for o in orgs:
+        if explicit in (o["alias"], o["username"]):
+            return o["alias"] or o["username"]
+    # allow a not-yet-listed alias/username to pass through (user knows best),
+    # but warn — it still must authenticate at deploy time.
+    return explicit
+
+
+def validation_has_errors(report_path: Path) -> bool | None:
+    """True/False if report exists; None if no report (unknown)."""
+    if not report_path.exists():
+        return None
+    try:
+        data = json.loads(report_path.read_text())
+        return int(data.get("counts", {}).get("ERROR", 0)) > 0
+    except Exception:
+        return None
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Deploy generated metadata via sf CLI")
+    ap.add_argument("--package", default="manifest/package.xml")
+    ap.add_argument("--pre-destructive", default="", help="destructiveChanges.xml (pre-deploy delete)")
+    ap.add_argument("--post-destructive", default="", help="destructiveChanges.xml (post-deploy delete)")
+    ap.add_argument("--target-org", default="",
+                    help="REQUIRED for deploy: org alias, username, or list index. "
+                         "No silent default — you must pick from the connected orgs.")
+    ap.add_argument("--list-orgs", action="store_true",
+                    help="print connected orgs and exit (org-selection gate)")
+    ap.add_argument("--test-level", default="RunLocalTests", choices=sorted(VALID_TEST_LEVELS))
+    ap.add_argument("--tests", default="", help="comma-separated tests for RunSpecifiedTests")
+    ap.add_argument("--start", action="store_true", help="REAL deploy (gated). Default is check-only validate.")
+    ap.add_argument("--validation-report", default=".build/validation_report.json")
+    ap.add_argument("--project-dir", default="",
+                    help="run the sf CLI from this SFDX project (staged builds "
+                         "live in .build/staging); default: current directory")
+    ap.add_argument("--log", default=".build/last_deploy.log",
+                    help="deploy log path; the failure context is written next to it")
+    ap.add_argument("--skip-validation-gate", action="store_true")
+    ap.add_argument("--wait", type=int, default=60)
+    ap.add_argument("--ignore-conflicts", action="store_true",
+                    help="pass --ignore-conflicts to sf (force local source over "
+                         "source-tracking conflicts). Use only for intentional redeploys.")
+    ap.add_argument("--dry-run", action="store_true", help="print the sf command, do not run")
+    args = ap.parse_args()
+
+    cli = sf_available()
+    if not cli:
+        print("❌ Salesforce CLI not found. Install with: npm i -g @salesforce/cli")
         return 1
-    except (OrgAuthError, TranslationUnavailable, MetadataApiError) as e:
-        print(f"\n⛔ {e}")
-        return 3
+
+    # ---- org-selection gate: ALWAYS show connected orgs -------------------- #
+    orgs = list_connected_orgs()
+    if args.list_orgs:
+        print_org_table(orgs)
+        return 0
+
+    pkg = Path(args.package).resolve() if Path(args.package).exists() else Path(args.package)
+    if not pkg.exists():
+        print(f"❌ package manifest '{pkg}' not found — run build_manifest.py first.")
+        return 1
+
+    org = resolve_target_org(args.target_org, orgs)
+    if not org:
+        print("⛔ DEPLOY BLOCKED — no target org selected.")
+        print("   Every deployment must target an explicitly-chosen connected org.\n")
+        print_org_table(orgs)
+        print("Re-run with your choice (index, alias, or username), e.g.:")
+        print("   python scripts/deploy.py --target-org 1            # by list index")
+        print("   python scripts/deploy.py --target-org \"ERP DEV 02\"  # by alias")
+        if not orgs:
+            print("\nNo orgs connected yet:  sf org login web --alias \"<ORG>\"")
+        return 2
+
+    # confirm the resolved org is actually a connected one (warn if unknown)
+    known = {o["alias"] for o in orgs} | {o["username"] for o in orgs}
+    if orgs and org not in known:
+        print(f"⚠️  '{org}' is not in the connected-orgs list — it must authenticate at deploy time.")
+
+    # ---- validation gate --------------------------------------------------- #
+    if not args.skip_validation_gate:
+        has_err = validation_has_errors(Path(args.validation_report))
+        if has_err is True:
+            print(f"⛔ Validation report '{args.validation_report}' has ERRORS — deploy blocked.")
+            print("   Fix the sheet and re-run:  python scripts/validate_sheet.py --json .build/validation_report.json")
+            return 2
+        if has_err is None:
+            print(f"⚠️  No validation report at '{args.validation_report}'.")
+            print("   Run validate_sheet.py first, or pass --skip-validation-gate to override.")
+            return 2
+
+    # Check-only uses `deploy start --dry-run` (validates, writes nothing,
+    # accepts NoTestRun on sandboxes). `deploy validate` is reserved for
+    # production quick-deploys and rejects NoTestRun, so we do not use it here.
+    cmd = ["sf", "project", "deploy", "start",
+           "--manifest", str(pkg),
+           "--target-org", org,
+           "--test-level", args.test_level,
+           "--wait", str(args.wait)]
+    if not args.start:
+        cmd.append("--dry-run")
+    if args.test_level == "RunSpecifiedTests":
+        if not args.tests:
+            print("❌ --test-level RunSpecifiedTests requires --tests")
+            return 1
+        for t in args.tests.split(","):
+            cmd += ["--tests", t.strip()]
+    if args.pre_destructive:
+        cmd += ["--pre-destructive-changes", args.pre_destructive]
+    if args.post_destructive:
+        cmd += ["--post-destructive-changes", args.post_destructive]
+    if args.ignore_conflicts:
+        cmd.append("--ignore-conflicts")
+
+    workdir = Path(args.project_dir).resolve() if args.project_dir else None
+    if workdir and not (workdir / "sfdx-project.json").exists():
+        print(f"❌ '{workdir}' is not an SFDX project (no sfdx-project.json).")
+        return 1
+
+    banner = "REAL DEPLOY (writes to org)" if args.start else "CHECK-ONLY VALIDATION (no org writes)"
+    print("=" * 72)
+    print(f"  {banner}")
+    print(f"  org        : {org}")
+    print(f"  manifest   : {pkg}")
+    print(f"  project    : {workdir or Path.cwd()}")
+    print(f"  test level : {args.test_level}")
+    print(f"  command    : {' '.join(cmd)}")
+    print("=" * 72)
+
+    if args.dry_run:
+        print("(dry-run) not executing.")
+        return 0
+
+    logpath = Path(args.log)
+    rc = _run_tee(cmd, logpath, cwd=workdir)
+
+    mode_label = "start" if args.start else "validate (dry-run)"
+    if rc != 0:
+        _write_failure_context(logpath, cmd, org, mode_label, rc)
+        _auto_log_failure(logpath.parent / "last_deploy_failure.json")
+        print("\n" + "─" * 72)
+        print(f"❌ Deploy {mode_label} FAILED (exit {rc}).")
+        print(f"   Full log : {logpath}")
+        print(f"   Context  : {logpath.parent / 'last_deploy_failure.json'}")
+        print("   → A DRAFT lesson was auto-written to .cursor/deployment_knowledge.md.")
+        print("     Run the SELF-CORRECTION loop: diagnose the root cause, fix the")
+        print("     generator/validation, COMPLETE the draft, and flip its Status")
+        print("     (see rule sf-deploy-self-correction).")
+    return rc
+
+
+def _auto_log_failure(context: Path) -> None:
+    """Auto-append a DRAFT self-correction lesson so the KB update is never
+    forgotten. Never raises into the caller (logging must not mask the failure)."""
+    try:
+        script = Path(__file__).with_name("log_failure.py")
+        subprocess.run([sys.executable, str(script), "--context", str(context)],
+                       timeout=30)
+    except Exception as e:
+        print(f"⚠️  auto-log of failure lesson skipped: {e}")
+
+
+def _run_tee(cmd: list[str], logpath: Path, cwd: Path | None = None) -> int:
+    """Run a command, streaming output live to console AND a log file."""
+    logpath.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with logpath.open("w", encoding="utf-8") as lf:
+            lf.write(f"# command: {' '.join(cmd)}\n")
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True, bufsize=1,
+                                    cwd=str(cwd) if cwd else None)
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                sys.stdout.write(line)
+                lf.write(line)
+            proc.wait()
+            return proc.returncode
+    except KeyboardInterrupt:
+        print("\n⏹️  aborted.")
+        return 130
+
+
+def _write_failure_context(logpath: Path, cmd: list[str], org: str,
+                           mode: str, rc: int) -> None:
+    """Persist a small structured record + extracted component failures for RCA."""
+    import datetime
+    import re
+
+    text = logpath.read_text(encoding="utf-8") if logpath.exists() else ""
+    # Pull component-failure lines from the sf human/table output (best-effort).
+    failures = []
+    for line in text.splitlines():
+        low = line.lower()
+        if any(k in low for k in ("error", "fail", "invalid", "missing", "not found",
+                                  "insufficient", "duplicate", "cannot")):
+            failures.append(line.strip())
+    err_codes = sorted(set(re.findall(r"\b[A-Z][A-Z_]{4,}\b", text)))
+    ctxpath = logpath.parent / "last_deploy_failure.json"
+    ctx = {
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "mode": mode,
+        "target_org": org,
+        "returncode": rc,
+        "command": cmd,
+        "log_file": str(logpath),
+        "extracted_failures": failures[:50],
+        "possible_error_codes": err_codes[:30],
+    }
+    ctxpath.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":

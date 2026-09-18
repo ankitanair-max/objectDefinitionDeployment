@@ -3,17 +3,18 @@
 attr_drift.py — GRANULAR, attribute-level drift check between the sheet's
 intended field DEFINITIONS and the org's ACTUAL field metadata, for any object.
 
-Why this exists: the name delta compares field API *names* only. A field that already exists in the org by name is treated as
+Why this exists: the delta step (prep_deploy/fetch_sheet) compares field API
+*names* only. A field that already exists in the org by name is treated as
 "already deployed" and skipped — even if the sheet later changed its TYPE,
 FORMULA, referenceTo, or PICKLIST values. This tool closes that blind spot by
 comparing the actual definitions for fields present in BOTH sheet and org.
 
-In the pipeline this file is used as a LIBRARY: `deploy.py` already has every
-object's CustomObject metadata in the bulk org snapshot, and the planner calls
-`parse_org_object()` + `compute_drift()` locally — no per-object
-authentication, no per-object Metadata API call. Each drift entry carries a
-`component` ("CustomField", or "CustomObject" for the standard Name field),
-because Obj__c.Name is not a deployable CustomField member.
+In the pipeline this file is also used as a LIBRARY: `prep_deploy.py` already
+has every object's CustomObject metadata in the bulk org snapshot, so
+`plan_deploy.py` calls `parse_org_object()` + `compute_drift()` locally — no
+per-object authentication and no per-object Metadata API call. Each drift entry
+carries a `component` ("CustomField", or "CustomObject" for the standard Name
+field), because Obj__c.Name is not a deployable CustomField member.
 
 The standalone CLI below still does its own live `readMetadata(CustomObject)`
 with a session from the supported CLI (`sf org display`), for ad-hoc checks.
@@ -88,16 +89,15 @@ def map_dt(dt: str):
     return dt.strip(), False, False  # unmapped: literal compare + flagged
 
 
-def load_token(org: str) -> dict:
+def load_token(org: str | None, token_file: str) -> dict:
     """Session for `org` from the supported CLI (`sf org display`).
 
     No keychain decryption and no assumption about where the CLI stores its
     auth, so this behaves the same on a laptop, a build agent or a container.
     """
-    if not org:
-        raise OrgAuthError("pass --org: the session comes from the Salesforce "
-                           "CLI, there is no auth file to fall back on.")
-    return org_auth(org)
+    if org:
+        return org_auth(org)
+    return json.load(open(token_file))["result"]
 
 
 def parse_org_object(rec: ET.Element) -> dict | None:
@@ -323,6 +323,7 @@ def main() -> int:
     ap.add_argument("--tab", help="sheet tab (for live fetch when --rows absent)")
     ap.add_argument("--spreadsheet-id")
     ap.add_argument("--org", help="alias/username to mint a live session token")
+    ap.add_argument("--token-file", default=".build/orgauth.json")
     ap.add_argument("--out", default=".build/attr_drift.json")
     ap.add_argument("--fail-on-drift", action="store_true")
     args = ap.parse_args()
@@ -342,7 +343,7 @@ def main() -> int:
 
     # 2) org metadata (standalone: one live read for this object)
     try:
-        a = load_token(args.org)
+        a = load_token(args.org, args.token_file)
         org = read_org_object(args.object, a["accessToken"],
                               a["instanceUrl"].rstrip("/"), a["apiVersion"])
     except (OrgAuthError, MetadataApiError) as e:

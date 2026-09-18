@@ -11,7 +11,7 @@ There is exactly ONE deployment entry point. It performs the whole chain,
 including object translations:
 
 ```
-python scripts/deploy.py --org "<TARGET_ORG>" --tabs "<OBJECT_TABS>" --start
+python scripts/prep_deploy.py --org "<TARGET_ORG>" --tabs "<OBJECT_TABS>" --phase deploy
 ```
 
 ```
@@ -41,19 +41,24 @@ Non-negotiables that follow from this:
  snapshot, never by running `attr_drift.py` once per object.
 - **Empty delta is a no-op.** A second run with no sheet changes produces an
  empty plan: no package, no org write.
-- **Translation sync state is written only after `verify_deploy.py` passes**, and
- is keyed by the org Id.
+- **Translation sync state is written only after `verify_deploy.py` passes**
+ (which now reads every packaged translation back from the org, so a
+ translation-only deploy cannot pass on its vacuous field check), and is keyed
+ by the org Id.
 - **Every package part deploys.** When the plan exceeds the component cap it
- records a manifest INDEX (`package.part1..N.xml`); `deploy.py` deploys every
- part in order and verifies each one before sending the next.
+ records a manifest INDEX (`package.part1..N.xml`); `prep_deploy.py` deploys
+ every part in order and verifies each one before sending the next.
 - **Drift is classified by component.** Custom-field drift → `CustomField`;
  standard `Name` drift → `CustomObject` (Obj__c.Name is not a CustomField
  member); translation drift → `CustomObjectTranslation`.
 - **Existing objects still ship their CustomObject when a new field needs it**
  (history tracking, Master-Detail sharing) — object metadata only, never the
  object's existing fields.
-- `sf_deployer.py` is the internal `sf` CLI executor `deploy.py` calls once per
- package part; it is not a deployment entry point on its own.
+- **IsDelete rides the destructive flow.** The plan's delete members are built
+ into `destructiveChanges.xml` every run and reported; they deploy only with
+ `prep_deploy.py --deletes`, never inside the additive package.
+- `deploy.py` is a low-level `sf` wrapper (no plan, no translations) and `run.py`
+ delegates to `prep_deploy.py`; neither is a deployment entry point on its own.
 
 Whenever the user asks to deploy ANY object or its fields to a target org, you
 MUST run the ordered flow below, every time, for EACH object in the request
@@ -194,29 +199,30 @@ and deploy ONLY the new (and, if explicitly requested, changed) fields.
  (FLS-independent) and compares, per field, **type, formula, referenceTo,
  picklist values, length, visibleLines, precision, scale, required, unique, and
  externalId** (and flags any unmapped Data Type). It writes
- `.build/attr_drift_<Obj>.json`. `deploy.py` runs this automatically
- BEFORE generation and the plan, and a NON-ZERO exit (or a missing report) HARD
- STOPS the build — a failed drift check is never read as a clean one.
+ `.build/attr_drift_<Obj>.json`. In the pipeline the same comparison runs as a
+ LIBRARY inside `plan_deploy.py` (`attr_drift.parse_org_object` +
+ `attr_drift.compute_drift`) against the object metadata already in the bulk
+ snapshot, so the drift lands in the plan without a single extra org call, and
+ each entry carries the `component` it must be deployed as. The CLI above stays
+ available for ad-hoc checks.
  SURFACE any drift to the user. Redeploying drift is a user decision, not
  automatic — many type changes (Lookup↔Formula, Checkbox↔Picklist, Text→Lookup)
  require delete+recreate and DESTROY the field's data, so never silently
  redeploy a drifted field. The opt-in is explicit and per field:
- `deploy.py --include-drift <Obj>__c.<Field>__c[,...]`.
+ `prep_deploy.py --include-drift <Obj>__c.<Field>__c[,...]`.
 3c. **TRANSLATION DELTA (MANDATORY when the tab has `Field Label (EN)`).** Name
    delta + attr_drift do not cover English. Locate EN by **header**
    `Field Label (EN)` (same as WIP / IsDelete / `fullName`).
-   `deploy.py` computes this inside the plan, from the same org snapshot:
+   `prep_deploy.py` Step 4b runs this automatically:
    ```
-   python scripts/plan_deploy.py --rows temp_updates.json \
-       --snapshot .build/org_snapshot.json --lang en_US
+   python scripts/translation_drift.py --rows temp_updates.json --org <ORG> --new-only
    python scripts/generate_object_translation.py --rows temp_updates.json \
-       --snapshot .build/org_snapshot.json --delta .build/deploy_plan.json
+       --org <ORG> --delta .build/translation_drift_objects.json
    ```
    Package **only** `NEW_TRANSLATION` (EN filled, no `en_US` in the org).
-   `CHANGED_EN` is reported, not auto-packaged. The generator PATCHES the org's
-   own `CustomObjectTranslation` tree so sibling translations are not wiped, and
-   `verify_deploy.py` reads every packaged translation back from the org before
-   the sync state is recorded. Blank EN → WARN `MISSING_TRANSLATION`; still deploy the Japanese
+   `CHANGED_EN` is reported, not auto-packaged. Retrieve-merge the org
+   `CustomObjectTranslation` `<Obj>__c-en_US` so sibling translations are not
+   wiped. Blank EN → WARN `MISSING_TRANSLATION`; still deploy the Japanese
    field; **do not invent English**. Full contract:
    `sf-object-translation-deploy.mdc`.
 4. **Report the delta before deploying:** e.g. "org already has N fields; sheet
@@ -225,8 +231,7 @@ and deploy ONLY the new (and, if explicitly requested, changed) fields.
    to the delta so redeploys stay fast and side-effect-free.
 5. Package + validate (check-only dry-run) the delta **including any**
    `CustomObjectTranslation:<Obj>__c-en_US` members from §3c, then deploy for
-   real with `deploy.py --start` (the ONLY flag that writes; every package
-   part is deployed and verified in order).
+   real with `deploy.py --start` (the ONLY flag that writes).
 6. **Log every on-the-go fix in TWO places — the value cell AND the AH note.**
    If, while packaging or deploying, you fix any attribute value (fill a blank
    `relationshipName`, supply a placeholder/real formula, resolve a collision,
@@ -260,7 +265,7 @@ package; `build_destructive.py` handles the actual deletion:
    also destroys the field's data.
 3. **Delete for real (DESTRUCTIVE):**
    ```
-   python scripts/sf_deployer.py --start \
+   python scripts/deploy.py --start \
        --pre-destructive manifest/destructiveChanges.xml \
        --package manifest/destructive_package.xml \
        --target-org "<ORG>" --test-level NoTestRun --skip-validation-gate
@@ -303,13 +308,12 @@ against the delta), so you confirm the WHOLE object matches the source of truth.
 - Existence checks, delta queries, and post-deploy verification must all use the
   Tooling API for field existence (FLS-independent), never `sobject describe`.
 - **Name-delta is NOT enough — attribute drift is MANDATORY.** For every existing
-  object, run `scripts/attr_drift.py` (auto-run by `deploy.py` build step 6b)
-  to compare the sheet's field DEFINITIONS (type/formula/referenceTo/picklist)
+  object, the plan step compares the sheet's field DEFINITIONS (type/formula/referenceTo/picklist)
   against the org's live metadata, and surface any drift. A field that exists by
   name but whose definition changed is a real, un-deployed change — never treat
   "exists in org" as "matches the sheet."
 - **Name-delta is also NOT enough for English.** When `Field Label (EN)` is on
-  the tab, run `plan_deploy.py (--new-only by default)` (auto-run by `deploy.py`
+  the tab, run `translation_drift.py --new-only` (auto-run by `prep_deploy.py`
   Step 4b). A field that exists in JA with no `en_US` COT entry is an un-deployed
   translation. Never write EN into `CustomField.label`. Never invent English.
 - **Attribute write-back is MANDATORY, not optional.** Any field attribute you
