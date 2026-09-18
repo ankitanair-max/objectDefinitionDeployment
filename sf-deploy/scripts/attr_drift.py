@@ -89,6 +89,38 @@ def map_dt(dt: str):
     return dt.strip(), False, False  # unmapped: literal compare + flagged
 
 
+def picklist_apis(tsv: str) -> list[str]:
+    """API-side picklist values from the sheet Type Specific Value cell."""
+    _tsv = (tsv or "").translate({0xFF1B: ord(";"), 0xFF1A: ord(":")})
+    return [p.split(":")[-1].strip() for p in re.split(r"[;\n]", _tsv) if p.strip()]
+
+
+def expected_from_row(r: dict) -> dict:
+    """Sheet-side attributes a post-deploy verify must confirm for one field."""
+    dt = (r.get("Data Type") or "").strip()
+    tsv = (r.get("Type Specific Value") or "").strip()
+    exp_base, exp_formula, _mapped = map_dt(dt)
+    expect: dict = {"type": exp_base, "formula": bool(exp_formula)}
+    if exp_formula and tsv:
+        expect["formulaBody"] = tsv
+    if exp_base in ("Lookup", "MasterDetail") and tsv:
+        expect["referenceTo"] = tsv
+    if exp_base in ("Picklist", "MultiselectPicklist") and tsv:
+        expect["picklist"] = picklist_apis(tsv)
+    return expect
+
+
+def expected_name(meta: dict) -> dict:
+    """Sheet-side standard Name attributes (type + AutoNumber displayFormat)."""
+    s_nt_raw = (meta.get("Name Field Type") or "").strip()
+    s_df = (meta.get("Name Field Display Format") or "").strip()
+    exp_nt, _isf, _m = map_dt(s_nt_raw)
+    out: dict = {"type": exp_nt}
+    if str(exp_nt).lower() == "autonumber":
+        out["displayFormat"] = s_df
+    return out
+
+
 def load_token(org: str | None, token_file: str) -> dict:
     """Session for `org` from the supported CLI (`sf org display`).
 
@@ -100,37 +132,69 @@ def load_token(org: str | None, token_file: str) -> dict:
     return json.load(open(token_file))["result"]
 
 
+def _ln(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else str(tag)
+
+
 def parse_org_object(rec: ET.Element) -> dict | None:
     """CustomObject <records> element -> {fieldFullName: {type, formula, ...}}.
 
     Pure: no network. The caller supplies the element, so the same comparison
-    runs against a live read OR against the bulk org snapshot.
+    runs against a live read OR against the bulk org snapshot. Tag matching
+    is namespace-tolerant (Metadata API records may carry a default xmlns).
     """
-    if rec is None or rec.find("fullName") is None:
+    if rec is None:
+        return None
+    full = None
+    for child in rec:
+        if _ln(child.tag) == "fullName":
+            full = (child.text or "").strip()
+            break
+    if not full:
         return None  # object absent in org
     org = {}
-    for f in rec.iter("fields"):
-        d = {c.tag: (c.text or "") for c in f}
-        vals = [v.findtext("fullName", "") for v in f.iter("value")]
-        if vals:
-            d["_picklist"] = [x for x in vals if x]
-        org[d.get("fullName", "")] = d
-    # capture the standard Name field (nameField block on the CustomObject) so the
-    # drift check can compare it too — it is NOT under <fields> and would otherwise
-    # be invisible (Text vs AutoNumber + displayFormat drift silently missed).
-    # object-level attributes a FIELD can depend on: a field with
-    # trackHistory=true needs enableHistory on the object, a Master-Detail
-    # field forces sharingModel=ControlledByParent.
+    enable_history = ""
+    sharing_model = ""
+    name_field = None
+    for child in rec:
+        tag = _ln(child.tag)
+        if tag == "fields":
+            d = {_ln(c.tag): (c.text or "") for c in child}
+            vals = []
+            for v in child.iter():
+                if _ln(v.tag) != "value":
+                    continue
+                fn = ""
+                for gc in v:
+                    if _ln(gc.tag) == "fullName":
+                        fn = (gc.text or "").strip()
+                        break
+                if fn:
+                    vals.append(fn)
+            if vals:
+                d["_picklist"] = [x for x in vals if x]
+            org[d.get("fullName", "")] = d
+        elif tag == "enableHistory":
+            enable_history = (child.text or "") or ""
+        elif tag == "sharingModel":
+            sharing_model = (child.text or "") or ""
+        elif tag == "nameField":
+            name_field = {
+                "type": "",
+                "displayFormat": "",
+                "label": "",
+            }
+            for gc in child:
+                name_field[_ln(gc.tag)] = (gc.text or "")
     org["__object__"] = {
-        "enableHistory": rec.findtext("enableHistory", "") or "",
-        "sharingModel": rec.findtext("sharingModel", "") or "",
+        "enableHistory": enable_history,
+        "sharingModel": sharing_model,
     }
-    nf = rec.find("nameField")
-    if nf is not None:
+    if name_field is not None:
         org["__nameField__"] = {
-            "type": nf.findtext("type", "") or "",
-            "displayFormat": nf.findtext("displayFormat", "") or "",
-            "label": nf.findtext("label", "") or "",
+            "type": name_field.get("type") or "",
+            "displayFormat": name_field.get("displayFormat") or "",
+            "label": name_field.get("label") or "",
         }
     return org
 

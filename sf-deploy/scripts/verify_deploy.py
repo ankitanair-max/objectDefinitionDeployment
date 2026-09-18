@@ -11,6 +11,9 @@ confirms, without manual inspection, that:
      (Tooling ``CustomField`` — FLS-independent; never FieldDefinition).
   3. each packaged CustomObjectTranslation entry is live in the org
      (filtered to ``--objects`` during per-part verification).
+  4. approved attribute updates (field type/formula/reference/picklist,
+     standard Name type/displayFormat, object history/sharing) match the
+     live CustomObject metadata — existence of the API name is not enough.
 
 It derives the expected object(s) + field(s) straight from the local generated
 metadata under force-app (the exact thing that was packaged), so there is no
@@ -32,9 +35,12 @@ import argparse
 import json
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import attr_drift  # noqa: E402
+import org_snapshot  # noqa: E402
 from translation_lib import (  # noqa: E402
     DEFAULT_LANG, MetadataApiError, OrgAuthError, TranslationUnavailable, norm,
     org_auth, parse_object_translation, read_object_translations, soql_name,
@@ -212,6 +218,111 @@ def verify_deletes(plan: dict, org: str) -> list[str]:
     return leftover
 
 
+def _norm_formula(body: str) -> str:
+    import re
+    return re.sub(r"\s+", "", str(body or "")).lower()
+
+
+def _field_attr_failures(obj: str, field: str, expect: dict, om: dict) -> list[str]:
+    fails: list[str] = []
+    loc = f"{obj}.{field}"
+    if not om:
+        return [f"{loc}: field missing from live CustomObject metadata"]
+    exp_type = expect.get("type") or ""
+    got_type = om.get("type") or ""
+    if exp_type and got_type != exp_type:
+        fails.append(f"{loc}: type expected={exp_type} org={got_type or '(none)'}")
+    if expect.get("formula"):
+        if not (om.get("formula") or "").strip():
+            fails.append(f"{loc}: expected a formula body, org is not a formula")
+        elif expect.get("formulaBody") and _norm_formula(expect["formulaBody"]) != _norm_formula(om.get("formula")):
+            fails.append(f"{loc}: formula body did not land")
+    elif (om.get("formula") or "").strip() and expect.get("formula") is False:
+        fails.append(f"{loc}: expected non-formula, org still has a formula")
+    if expect.get("referenceTo") and (om.get("referenceTo") or "") != expect["referenceTo"]:
+        fails.append(
+            f"{loc}: referenceTo expected={expect['referenceTo']} "
+            f"org={om.get('referenceTo') or '(none)'}")
+    if expect.get("picklist"):
+        got = list(om.get("_picklist") or [])
+        if set(expect["picklist"]) != set(got):
+            fails.append(
+                f"{loc}: picklist expected={expect['picklist']} org={got}")
+    return fails
+
+
+def verify_attribute_updates(plan: dict, org: str,
+                             members: dict | None = None) -> list[str]:
+    """Confirm approved definition updates against live CustomObject metadata.
+
+    Name-existence is not enough: a type/formula/reference/picklist change, a
+    standard Name type/displayFormat change, or an object history/sharing
+    patch can all exist-as-name while the org still has the old definition.
+    """
+    expectations = plan.get("attributeExpectations") or {}
+    if not expectations:
+        return []
+
+    field_by_obj: dict[str, set[str]] = {}
+    part_objects: set[str] | None = None
+    if members is not None:
+        part_objects = set()
+        for m in members.get("CustomObject") or []:
+            part_objects.add(str(m))
+        for m in members.get("CustomField") or []:
+            if "." not in str(m):
+                continue
+            o, f = str(m).split(".", 1)
+            part_objects.add(o)
+            field_by_obj.setdefault(o, set()).add(f)
+        objs = [o for o in expectations if o in part_objects]
+    else:
+        objs = list(expectations)
+
+    if not objs:
+        return []
+
+    auth = org_auth(org)
+    xmls = org_snapshot.object_snapshot(sorted(objs), auth)
+    failures: list[str] = []
+    for obj in sorted(objs):
+        xml = xmls.get(obj)
+        if not xml:
+            failures.append(f"{obj}: live CustomObject metadata was not returned")
+            continue
+        parsed = attr_drift.parse_org_object(ET.fromstring(xml)) or {}
+        exp = expectations.get(obj) or {}
+        check_object = members is None or obj in set(members.get("CustomObject") or [])
+        if check_object:
+            ometa = parsed.get("__object__") or {}
+            for key, want in (exp.get("object") or {}).items():
+                got = (ometa.get(key) or "").strip()
+                if str(got).lower() != str(want).lower():
+                    failures.append(
+                        f"{obj}.{key}: expected={want} org={got or '(none)'}")
+            nexp = exp.get("nameField") or {}
+            if nexp:
+                onf = parsed.get("__nameField__") or {}
+                want_type = nexp.get("type") or ""
+                got_type = onf.get("type") or ""
+                if want_type and want_type.lower() != got_type.lower():
+                    failures.append(
+                        f"{obj}.Name type: expected={want_type} org={got_type or '(none)'}")
+                if "displayFormat" in nexp:
+                    want_df = nexp.get("displayFormat") or ""
+                    got_df = onf.get("displayFormat") or ""
+                    if want_df != got_df:
+                        failures.append(
+                            f"{obj}.Name displayFormat: expected={want_df!r} org={got_df!r}")
+        fields_to_check = set((exp.get("fields") or {}))
+        if members is not None:
+            fields_to_check &= field_by_obj.get(obj, set())
+        for field in sorted(fields_to_check):
+            failures.extend(_field_attr_failures(
+                obj, field, exp["fields"][field], parsed.get(field) or {}))
+    return failures
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Live post-deploy verification")
     ap.add_argument("--target-org", required=True)
@@ -290,6 +401,22 @@ def main(argv: list[str] | None = None) -> int:
         for f in failures:
             print(f"        ✗ {f}")
         if failures:
+            overall_ok = False
+
+    # approved type/formula/Name/object-level updates — existence is not enough
+    if plan.get("attributeExpectations"):
+        try:
+            attr_failures = verify_attribute_updates(
+                plan, args.target_org, members=part_members)
+        except (OrgAuthError, MetadataApiError) as e:
+            attr_failures = [f"could not read CustomObject metadata: {e}"]
+        print(f"\n  [{'OK' if not attr_failures else 'FAIL'}] attribute updates")
+        print(f"      objects with expectations: "
+              f"{len(plan.get('attributeExpectations') or {})}  |  "
+              f"mismatches: {len(attr_failures)}")
+        for f in attr_failures:
+            print(f"        ✗ {f}")
+        if attr_failures:
             overall_ok = False
 
     print("\n" + "=" * 72)

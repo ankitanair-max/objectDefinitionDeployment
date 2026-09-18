@@ -113,6 +113,12 @@ def normalize_type(raw: str):
     return aliases.get(t, t), False
 
 
+def _is_autonumber_name_type(raw: str) -> bool:
+    """True when the object's standard Name field is declared AutoNumber."""
+    k = re.sub(r"[\s\-]+", "", str(raw or "").strip().lower())
+    return k in {"autonumber", "自動採番"}
+
+
 def validate(rows: list[dict], rep: Report, org_objects: set[str] | None = None) -> None:
     # object set present in this deploy (for dependency hints)
     deploy_objects = {r.get("Object API Name", "").strip()
@@ -135,6 +141,15 @@ def validate(rows: list[dict], rep: Report, org_objects: set[str] | None = None)
                 rep.error(r.get("Object Label", "?"), "-", "object.api", "Object API Name is blank")
             elif not (API_NAME_RE.match(obj) and obj.endswith("__c")):
                 rep.error(obj, "-", "object.api", f"Object API '{obj}' invalid (must match API name regex and end __c)")
+            nft = (r.get("Name Field Type") or "").strip()
+            ndf = (r.get("Name Field Display Format") or "").strip()
+            if _is_autonumber_name_type(nft) and not ndf:
+                loc = obj or r.get("Object Label", "?")
+                rep.error(
+                    loc, "Name", "object.name.autonumber.format",
+                    "Name Field Type is AutoNumber but Name Field Display Format "
+                    "is blank — park the object; never guess a numbering scheme "
+                    "and never coerce the Name field to Text")
             continue
 
         obj = r.get("Object API Name", "").strip() or r.get("_SheetName", "").strip()

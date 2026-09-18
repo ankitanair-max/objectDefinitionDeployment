@@ -171,13 +171,51 @@ def object_of(mtype: str, member: str) -> str:
     return member
 
 
+def split_object_group(group: dict[str, list[str]], max_components: int
+                       ) -> list[dict[str, list[str]]]:
+    """Packages for ONE object, each at most ``max_components``.
+
+    ``CustomObject`` is always the first member of the first package so a
+    new object's definition precedes any field part that depends on it.
+    Oversized groups are split rather than emitted as one illegal package.
+    """
+    if max_components <= 0:
+        return [group]
+    sequence: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for mtype in TYPE_ORDER:
+        for m in group.get(mtype) or []:
+            sequence.append((mtype, m))
+        seen.add(mtype)
+    for mtype, vals in group.items():
+        if mtype in seen:
+            continue
+        for m in vals:
+            sequence.append((mtype, m))
+    if not sequence:
+        return []
+
+    packages: list[dict[str, list[str]]] = []
+    current: dict[str, list[str]] = {}
+    count = 0
+    for mtype, member in sequence:
+        if count >= max_components:
+            packages.append(current)
+            current, count = {}, 0
+        current.setdefault(mtype, []).append(member)
+        count += 1
+    if current:
+        packages.append(current)
+    return packages
+
+
 def split_members(members: dict[str, list[str]], max_components: int
                   ) -> list[dict[str, list[str]]]:
     """Split a member set into deterministic packages under the component cap.
 
-    Grouping is by object, so an object, its new fields and its translations
-    always deploy together in the same package (a field can't land in package 2
-    while its object waits in package 1).
+    Members of the same object stay together when they fit. If one object's
+    group exceeds the cap it is split (CustomObject first, then fields, then
+    translations) rather than producing an oversized package.
     """
     total = sum(len(v) for v in members.values())
     if max_components <= 0 or total <= max_components:
@@ -191,19 +229,30 @@ def split_members(members: dict[str, list[str]], max_components: int
     packages: list[dict[str, list[str]]] = []
     current: dict[str, list[str]] = {}
     count = 0
-    for obj in sorted(by_object):
-        group = by_object[obj]
-        size = sum(len(v) for v in group.values())
-        if count and count + size > max_components:
+
+    def flush() -> None:
+        nonlocal current, count
+        if current:
             packages.append(current)
-            current, count = {}, 0
-        for mtype, vals in group.items():
-            current.setdefault(mtype, []).extend(vals)
-        count += size
-    if current:
-        packages.append(current)
-    return [{k: sorted(v) for k, v in sorted(p.items(),
-                                             key=lambda kv: TYPE_ORDER.index(kv[0]))}
+        current, count = {}, 0
+
+    for obj in sorted(by_object):
+        for chunk in split_object_group(by_object[obj], max_components):
+            size = sum(len(v) for v in chunk.values())
+            if size > max_components:
+                raise ValueError(
+                    f"object {obj} produced a {size}-component chunk above "
+                    f"max_components={max_components}; split_object_group must "
+                    "keep every package at or under the cap")
+            if count and count + size > max_components:
+                flush()
+            for mtype, vals in chunk.items():
+                current.setdefault(mtype, []).extend(vals)
+            count += size
+    flush()
+    return [{k: sorted(v) for k, v in sorted(
+        p.items(),
+        key=lambda kv: TYPE_ORDER.index(kv[0]) if kv[0] in TYPE_ORDER else 99)}
             for p in packages]
 
 

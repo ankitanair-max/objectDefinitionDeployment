@@ -144,6 +144,52 @@ def object_update_reasons(obj: str, new_fields: list[str], rows: list[dict],
     return reasons
 
 
+def build_attribute_expectations(
+    objects: list[dict], rows: list[dict], include_drift: set[str],
+    object_updates: dict[str, list[str]],
+) -> dict[str, dict]:
+    """Live-verify targets for approved drift and object-level patches.
+
+    Existence-only verification cannot catch a type/formula/Name/sharing
+    update that failed to land. These expectations are compared to a live
+    CustomObject read after deploy.
+    """
+    out: dict[str, dict] = {}
+    for o in objects:
+        obj = o["object"]
+        exp: dict = {}
+        reasons = object_updates.get(obj) or []
+        oexp: dict = {}
+        if any("enableHistory" in r for r in reasons):
+            oexp["enableHistory"] = "true"
+        if any("ControlledByParent" in r for r in reasons):
+            oexp["sharingModel"] = "ControlledByParent"
+        if oexp:
+            exp["object"] = oexp
+        if f"{obj}.Name" in include_drift:
+            meta = attr_drift.object_meta_row(obj, rows)
+            if meta:
+                exp["nameField"] = attr_drift.expected_name(meta)
+        fields: dict = {}
+        prefix = f"{obj}."
+        for key in include_drift:
+            if not key.startswith(prefix):
+                continue
+            field = key[len(prefix):]
+            if field == "Name":
+                continue
+            row = next((r for r in rows
+                        if norm(r.get("Object API Name")) == obj
+                        and norm(r.get("Field API Name")) == field), None)
+            if row:
+                fields[field] = attr_drift.expected_from_row(row)
+        if fields:
+            exp["fields"] = fields
+        if exp:
+            out[obj] = exp
+    return out
+
+
 def build_plan(rows: list[dict], snapshot: dict, *, sheet_id: str, tabs: str,
                lang: str = DEFAULT_LANG, new_only: bool = False,
                include_drift: set[str] | None = None,
@@ -163,6 +209,7 @@ def build_plan(rows: list[dict], snapshot: dict, *, sheet_id: str, tabs: str,
     new_objects: list[str] = []
     new_fields: dict[str, list[str]] = {}
     skipped_fields: dict[str, list[str]] = {}
+    skipped_deletes: dict[str, list[str]] = {}
     delete_members: list[str] = []
 
     for obj in sorted(scope):
@@ -196,7 +243,12 @@ def build_plan(rows: list[dict], snapshot: dict, *, sheet_id: str, tabs: str,
                 object_updates.setdefault(obj, []).append(why)
         if present:
             skipped_fields[obj] = sorted(present)
-        delete_members += [f"{obj}.{f}" for f in sorted(b["delete"])]
+        requested_deletes = [f for f in sorted(b["delete"])]
+        live_deletes = [f for f in requested_deletes if f in have]
+        absent_deletes = [f for f in requested_deletes if f not in have]
+        delete_members += [f"{obj}.{f}" for f in live_deletes]
+        if absent_deletes:
+            skipped_deletes[obj] = absent_deletes
 
         objects.append({
             "object": obj,
@@ -208,7 +260,8 @@ def build_plan(rows: list[dict], snapshot: dict, *, sheet_id: str, tabs: str,
             "existingFields": sorted(present),
             "wipSkipped": sorted(b["wip"]),
             "standardSkipped": sorted(b["standard"]),
-            "deleteRequested": sorted(b["delete"]),
+            "deleteRequested": requested_deletes,
+            "deleteSkippedAbsent": absent_deletes,
             "attributeDrift": drifted,
             "driftApproved": redeploy,
             "objectUpdate": object_updates.get(obj, []),
@@ -267,6 +320,9 @@ def build_plan(rows: list[dict], snapshot: dict, *, sheet_id: str, tabs: str,
         "translations": translations,
         "translationPackage": [t["id"] for t in translations if t.get("package")],
         "deleteMembers": sorted(delete_members),
+        "skippedDeletes": {o: f for o, f in sorted(skipped_deletes.items())},
+        "attributeExpectations": build_attribute_expectations(
+            objects, rows, include_drift, object_updates),
         "manifestMembers": members,
         "manifestParts": build_manifest.plan_parts(members, max_components),
         "validationErrors": [{"id": e["id"], "code": e["code"],
@@ -287,6 +343,7 @@ def build_plan(rows: list[dict], snapshot: dict, *, sheet_id: str, tabs: str,
         "translationsUnchanged": sum(1 for t in translations if t.get("code") == UNCHANGED),
         "translationsMissing": sum(1 for t in translations if t.get("code") == MISSING),
         "deletes": len(delete_members),
+        "skippedDeletes": sum(len(v) for v in skipped_deletes.values()),
         "components": sum(len(v) for v in members.values()),
         "packages": len(build_manifest.plan_parts(members, max_components)),
         "objectUpdates": len(object_updates),

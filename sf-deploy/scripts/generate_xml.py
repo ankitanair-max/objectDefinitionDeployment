@@ -28,6 +28,10 @@ def qname(tag: str) -> str:
     return f"{{{NS}}}{tag}"
 
 
+class ObjectMetaError(ValueError):
+    """Object-level metadata cannot be generated without guessing."""
+
+
 def get_or_create(parent: ET.Element, tag: str) -> ET.Element:
     el = parent.find(qname(tag))
     if el is None:
@@ -233,17 +237,7 @@ def write_patched_object_meta(
         set_text(root, "enableHistory", "true")
 
     if name_field is not None:
-        for child in list(root):
-            if _localname(child.tag) == "nameField":
-                root.remove(child)
-        _append_name_field(
-            root,
-            obj_api=obj_api,
-            obj_label=str(name_field.get("label") or obj_api),
-            name_field_label=str(name_field.get("label") or ""),
-            name_field_type=str(name_field.get("type") or ""),
-            name_field_display_format=str(name_field.get("displayFormat") or ""),
-        )
+        _patch_name_field(root, name_field=name_field)
 
     if hasattr(ET, "indent"):
         ET.indent(root, space="    ")
@@ -270,6 +264,59 @@ def ensure_object_meta(obj_api: str, obj_label: str) -> None:
         write_object_meta(obj_api, obj_label)
 
 
+def _find_local(parent: ET.Element, name: str) -> ET.Element | None:
+    for child in parent:
+        if _localname(child.tag) == name:
+            return child
+    return None
+
+
+def _patch_name_field(root: ET.Element, *, name_field: dict) -> None:
+    """Update only approved Name type/displayFormat on the org's <nameField>.
+
+    A blank sheet label must NOT invent ``{Object} Name`` — that would
+    overwrite the live org label. AutoNumber without displayFormat is a
+    hard error, matching the new-object generator path.
+    """
+    nf = _find_local(root, "nameField")
+    if nf is None:
+        nf = ET.SubElement(root, qname("nameField"))
+
+    def _txt(tag: str) -> str:
+        el = _find_local(nf, tag)
+        return ((el.text or "") if el is not None else "").strip()
+
+    org_type, org_label = _txt("type"), _txt("label")
+
+    raw_type = str(name_field.get("type") or "").strip()
+    normalized_type = _TYPE_MAP.get(raw_type.lower(), raw_type) if raw_type else org_type
+    if normalized_type and normalized_type not in ("Text", "AutoNumber"):
+        print(
+            f"⚠️  nameField type '{raw_type}' is not Text/AutoNumber — leaving org type {org_type or 'Text'}."
+        )
+        normalized_type = org_type or "Text"
+    if not normalized_type:
+        normalized_type = "Text"
+
+    display_format = str(name_field.get("displayFormat") or "").strip()
+    if normalized_type == "AutoNumber" and not display_format:
+        raise ObjectMetaError(
+            "Name Field Type is AutoNumber but displayFormat is blank. "
+            "Refusing to coerce the Name field to Text or invent a numbering "
+            "scheme — supply Name Field Display Format on the sheet.")
+
+    sheet_label = str(name_field.get("label") or "").strip()
+    label = sheet_label or org_label
+
+    for child in list(nf):
+        nf.remove(child)
+    if normalized_type == "AutoNumber":
+        set_text(nf, "displayFormat", display_format)
+    if label:
+        set_text(nf, "label", label)
+    set_text(nf, "type", normalized_type)
+
+
 def _append_name_field(
     root: ET.Element,
     *,
@@ -285,10 +332,10 @@ def _append_name_field(
     `<label>`, `<type>`, and — only for AutoNumber — `<displayFormat>`.
     A flat ``<nameField>FieldApi__c</nameField>`` is invalid at deploy time.
 
-    Defaulting rules:
+    Defaulting rules (NEW objects only):
     - blank type  → ``Text``
     - blank label → ``{obj_label} Name`` (or ``{obj_api} Name`` if no label)
-    - AutoNumber with blank displayFormat → hard error (SFDC requires it).
+    - AutoNumber with blank displayFormat → hard error (never coerce to Text).
     """
     raw_type = (name_field_type or "").strip()
     normalized_type = _TYPE_MAP.get(raw_type.lower(), raw_type) if raw_type else "Text"
@@ -307,17 +354,11 @@ def _append_name_field(
 
     display_format = (name_field_display_format or "").strip()
     if normalized_type == "AutoNumber" and not display_format:
-        # Degrade gracefully instead of crashing the whole generator run.
-        # A stale "AutoNumber" in the sheet's Name-row type cell (e.g. left
-        # over from a Pull against an old flat <nameField> element) should not
-        # block every other object in the same Push. Coerce to Text and warn
-        # so the operator can correct the sheet.
-        print(
-            f"⚠️  Object {obj_api}: nameField type is AutoNumber but displayFormat is blank "
-            "— coerced to Text. Fill the 'Type Specific Value' column on the Name row "
-            "(fullName='Name') of the sheet to keep AutoNumber."
-        )
-        normalized_type = "Text"
+        raise ObjectMetaError(
+            f"Object {obj_api}: Name Field Type is AutoNumber but displayFormat "
+            "is blank. Refusing to coerce the Name field to Text — supply "
+            "Name Field Display Format on the sheet (a numbering scheme is a "
+            "business decision, not a generator default).")
 
     nf = ET.SubElement(root, qname("nameField"))
     # Child order: displayFormat (if AutoNumber), label, type — matches the
@@ -1024,7 +1065,11 @@ def main() -> int:
         snapshot = json.loads(Path(args.snapshot).read_text(encoding="utf-8"))
 
     print(f"Processing {len(rows)} row(s) → {objects_root()}")
-    process_fields(rows, plan=plan, snapshot=snapshot)
+    try:
+        process_fields(rows, plan=plan, snapshot=snapshot)
+    except ObjectMetaError as e:
+        print(f"⛔ {e}")
+        return 1
     print("Custom field XML generation complete.")
     return 0
 

@@ -544,7 +544,7 @@ def test_delete_only_deploy_phase_still_runs_destructive():
 
 def test_isdelete_is_never_in_the_additive_package():
     rows = [meta_row(_DeleteRequested=["TI_Fnt_Old__c"]), field_row("TI_Fnt_New__c")]
-    snap = existing_snapshot(org_object_xml())
+    snap = existing_snapshot(org_object_xml(), fields=["TI_Fnt_Old__c"])
     plan = plan_deploy.build_plan(rows, snap, sheet_id="S", tabs="t", lang="off")
 
     assert plan["deleteMembers"] == [f"{OBJ}.TI_Fnt_Old__c"]
@@ -655,6 +655,71 @@ def test_one_object_split_across_parts_verifies_only_this_part():
     assert rc_object == 1, "object-scoped verify would demand part 2's fields"
 
 
+def test_attribute_updates_are_verified_against_live_metadata():
+    """Existence-only verification must not pass when the org still has old attrs."""
+    plan = {
+        "attributeExpectations": {
+            OBJ: {
+                "object": {"enableHistory": "true",
+                           "sharingModel": "ControlledByParent"},
+                "nameField": {"type": "AutoNumber",
+                              "displayFormat": "RCV-{0000000}"},
+                "fields": {"TI_Fnt_Kind__c": {
+                    "type": "Picklist", "formula": False, "picklist": ["A", "B"]}},
+            }
+        }
+    }
+    auth = {"accessToken": "t", "instanceUrl": "https://x", "apiVersion": "60.0"}
+    stale = (
+        f"<records><fullName>{OBJ}</fullName>"
+        "<enableHistory>false</enableHistory>"
+        "<sharingModel>ReadWrite</sharingModel>"
+        "<nameField><type>Text</type><label>No</label></nameField>"
+        "<fields><fullName>TI_Fnt_Kind__c</fullName><type>Checkbox</type></fields>"
+        "</records>")
+    landed = (
+        f"<records><fullName>{OBJ}</fullName>"
+        "<enableHistory>true</enableHistory>"
+        "<sharingModel>ControlledByParent</sharingModel>"
+        "<nameField><type>AutoNumber</type>"
+        "<displayFormat>RCV-{0000000}</displayFormat><label>No</label></nameField>"
+        "<fields><fullName>TI_Fnt_Kind__c</fullName><type>Picklist</type>"
+        "<value><fullName>A</fullName></value>"
+        "<value><fullName>B</fullName></value></fields>"
+        "</records>")
+
+    with patched(verify_deploy, "org_auth", lambda org: auth), \
+            patched(verify_deploy.org_snapshot, "object_snapshot",
+                    lambda objs, a: {OBJ: stale}):
+        fails = verify_deploy.verify_attribute_updates(plan, "A")
+        assert fails, "stale org metadata must fail attribute verification"
+        assert any("Name type" in f for f in fails), fails
+        assert any("TI_Fnt_Kind__c" in f for f in fails), fails
+        assert any("enableHistory" in f for f in fails), fails
+
+    with patched(verify_deploy, "org_auth", lambda org: auth), \
+            patched(verify_deploy.org_snapshot, "object_snapshot",
+                    lambda objs, a: {OBJ: landed}):
+        assert verify_deploy.verify_attribute_updates(plan, "A") == []
+
+    # a field-only package part must not demand the Name/object patch yet
+    field_part = {"CustomField": [f"{OBJ}.TI_Fnt_Kind__c"]}
+    mixed = (
+        f"<records><fullName>{OBJ}</fullName>"
+        "<enableHistory>false</enableHistory>"
+        "<sharingModel>ReadWrite</sharingModel>"
+        "<nameField><type>Text</type><label>No</label></nameField>"
+        "<fields><fullName>TI_Fnt_Kind__c</fullName><type>Picklist</type>"
+        "<value><fullName>A</fullName></value>"
+        "<value><fullName>B</fullName></value></fields>"
+        "</records>")
+    with patched(verify_deploy, "org_auth", lambda org: auth), \
+            patched(verify_deploy.org_snapshot, "object_snapshot",
+                    lambda objs, a: {OBJ: mixed}):
+        assert verify_deploy.verify_attribute_updates(
+            plan, "A", members=field_part) == []
+
+
 def main() -> int:
     print("test_deploy_command")
     for fn in (
@@ -687,6 +752,7 @@ def main() -> int:
         test_translation_scope_skips_workbench_without_en,
         test_delete_only_fails_if_fields_remain,
         test_one_object_split_across_parts_verifies_only_this_part,
+        test_attribute_updates_are_verified_against_live_metadata,
     ):
         fn()
         print(f"  ok  {fn.__name__[5:].replace('_', '-')}")

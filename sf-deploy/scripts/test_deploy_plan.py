@@ -168,6 +168,20 @@ def test_delete_only_plan_is_not_empty():
     print("  ok  delete-only-plan-is-not-empty")
 
 
+def test_already_absent_isdelete_is_a_noop():
+    """A second run after a successful delete must be an empty delta."""
+    rows = [meta_row(delete=["TI_Fnt_Obsolete__c"])]
+    first = plan_for(rows, snapshot(fields=["TI_Fnt_Obsolete__c"]), lang="off")
+    assert first["deleteMembers"] == [f"{OBJ}.TI_Fnt_Obsolete__c"]
+    assert first["summary"]["empty"] is False
+    second = plan_for(rows, snapshot(fields=[]), lang="off")
+    assert second["deleteMembers"] == []
+    assert second["objects"][0]["deleteSkippedAbsent"] == ["TI_Fnt_Obsolete__c"]
+    assert second["summary"]["deletes"] == 0
+    assert second["summary"]["empty"] is True
+    print("  ok  already-absent-isdelete-is-a-noop")
+
+
 def test_existing_field_missing_en_is_reported_not_packaged():
     rows = [meta_row(), field_row("TI_Fnt_ProductName__c", "商品名", en="")]
     snap = snapshot(fields=["TI_Fnt_ProductName__c"],
@@ -215,7 +229,7 @@ def test_existing_field_new_translation_is_packaged():
 def test_wip_and_isdelete_are_separated():
     rows = [meta_row(wip=["TI_Fnt_Draft__c"], delete=["TI_Fnt_Obsolete__c"]),
             field_row("TI_Fnt_Qty__c", "数量", "Quantity")]
-    plan = plan_for(rows, snapshot(fields=[]))
+    plan = plan_for(rows, snapshot(fields=["TI_Fnt_Obsolete__c"]))
     obj = plan["objects"][0]
 
     assert obj["wipSkipped"] == ["TI_Fnt_Draft__c"]
@@ -503,6 +517,40 @@ def test_package_split_is_deterministic_and_grouped():
     print("  ok  package-split-is-deterministic-and-grouped")
 
 
+def test_oversized_existing_object_is_split_by_the_planner():
+    """A single existing object's field delta that exceeds the cap must split."""
+    rows = [meta_row()] + [
+        field_row(f"TI_Fnt_F{i:02d}__c", f"項目{i}", f"Field {i}")
+        for i in range(5)]
+    plan = plan_for(rows, snapshot(fields=[]), lang="off", max_components=2)
+    parts = plan["manifestParts"]
+    sizes = [p["components"] for p in parts]
+    assert all(s <= 2 for s in sizes), sizes
+    assert sum(sizes) == 5
+    fields = []
+    for p in parts:
+        fields.extend(p["members"].get("CustomField") or [])
+        assert "CustomObject" not in (p["members"] or {})
+    assert len(set(fields)) == 5
+    print("  ok  oversized-existing-object-is-split-by-the-planner")
+
+
+def test_new_object_customobject_precedes_oversized_field_parts():
+    """A new object's CustomObject must land before any overflow field package."""
+    rows = [meta_row()] + [
+        field_row(f"TI_Fnt_F{i:02d}__c", f"項目{i}", f"Field {i}")
+        for i in range(3)]
+    plan = plan_for(rows, snapshot(exists=False), lang="off", max_components=2)
+    parts = plan["manifestParts"]
+    assert parts[0]["members"].get("CustomObject") == [OBJ]
+    assert all(OBJ not in (p["members"].get("CustomObject") or [])
+               for p in parts[1:])
+    assert all(p["components"] <= 2 for p in parts)
+    fields = [m for p in parts for m in (p["members"].get("CustomField") or [])]
+    assert len(fields) == 3
+    print("  ok  new-object-customobject-precedes-oversized-field-parts")
+
+
 # --------------------------------------------------------------------------- #
 # scale
 # --------------------------------------------------------------------------- #
@@ -738,6 +786,84 @@ def test_approved_name_drift_is_written_into_object_meta():
     print("  ok  approved-name-drift-is-written-into-object-meta")
 
 
+def test_approved_name_drift_preserves_org_label_when_sheet_label_blank():
+    """Approved Name type/format must not invent a label that overwrites the org."""
+    import generate_xml
+
+    org_xml = (
+        f"<records><fullName>{OBJ}</fullName>"
+        f"<sharingModel>ReadWrite</sharingModel>"
+        f"<nameField><type>Text</type><label>受入番号</label></nameField>"
+        f"</records>")
+    meta = meta_row()
+    meta["Name Field Type"] = "Autonumber"
+    meta["Name Field Display Format"] = "RCV-{0000000}"
+    meta["Name Field Label"] = ""
+    rows = [meta]
+    snap = snapshot(fields=["TI_Fnt_Qty__c"], object_meta={OBJ: org_xml})
+    drift = {OBJ: [{"field": "Name", "component": "CustomObject",
+                    "reason": "STANDARD Name field; type: sheet=AutoNumber org=Text"}]}
+    plan = plan_for(rows, snap, drift=drift, include_drift={f"{OBJ}.Name"}, lang="off")
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "force-app/main/default"
+        generate_xml.set_source_root(src)
+        generate_xml.process_fields(
+            generate_xml.plan_filter(rows, plan), plan=plan, snapshot=snap)
+        payload = (src / "objects" / OBJ / f"{OBJ}.object-meta.xml").read_text()
+        assert "<type>AutoNumber</type>" in payload
+        assert "<displayFormat>RCV-{0000000}</displayFormat>" in payload
+        assert "<label>受入番号</label>" in payload
+        assert f"{OBJ} Name" not in payload
+        assert "Receiving Name" not in payload
+    print("  ok  approved-name-drift-preserves-org-label-when-sheet-label-blank")
+
+
+def test_blank_autonumber_name_format_is_a_hard_error():
+    """AutoNumber Name with a blank display format must not coerce to Text."""
+    import generate_xml
+    import validate_sheet
+
+    meta = meta_row()
+    meta["Name Field Type"] = "AutoNumber"
+    meta["Name Field Display Format"] = ""
+    rows = [meta]
+    rep = validate_sheet.Report()
+    validate_sheet.validate(rows, rep)
+    assert any(i["check"] == "object.name.autonumber.format" for i in rep.items), rep.items
+    assert rep.counts["ERROR"] >= 1
+
+    with tempfile.TemporaryDirectory() as tmp:
+        generate_xml.set_source_root(Path(tmp) / "force-app/main/default")
+        try:
+            generate_xml.write_object_meta(
+                OBJ, "受入", name_field_type="AutoNumber",
+                name_field_display_format="")
+            raise AssertionError("generator must not coerce AutoNumber Name to Text")
+        except generate_xml.ObjectMetaError as e:
+            assert "displayFormat" in str(e) or "AutoNumber" in str(e)
+
+    org_xml = (
+        f"<records><fullName>{OBJ}</fullName>"
+        f"<sharingModel>ReadWrite</sharingModel>"
+        f"<nameField><type>Text</type><label>No</label></nameField>"
+        f"</records>")
+    snap = snapshot(fields=["TI_Fnt_Qty__c"], object_meta={OBJ: org_xml})
+    drift = {OBJ: [{"field": "Name", "component": "CustomObject",
+                    "reason": "STANDARD Name field; blank AutoNumber format"}]}
+    plan = plan_for(rows, snap, drift=drift, include_drift={f"{OBJ}.Name"}, lang="off")
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "force-app/main/default"
+        generate_xml.set_source_root(src)
+        try:
+            generate_xml.process_fields(
+                generate_xml.plan_filter(rows, plan), plan=plan, snapshot=snap)
+            payload = (src / "objects" / OBJ / f"{OBJ}.object-meta.xml").read_text()
+            raise AssertionError(f"patched generator coerced AutoNumber to Text:\n{payload}")
+        except generate_xml.ObjectMetaError:
+            pass
+    print("  ok  blank-autonumber-name-format-is-a-hard-error")
+
+
 def test_approved_drift_generates_only_the_changed_field():
     """Approved attribute drift → only that field XML and only that manifest member."""
     import generate_xml
@@ -826,6 +952,7 @@ def main() -> int:
         test_existing_field_new_translation_is_packaged,
         test_wip_and_isdelete_are_separated,
         test_delete_only_plan_is_not_empty,
+        test_already_absent_isdelete_is_a_noop,
         test_standard_fields_are_never_custom_field_members,
         test_attribute_drift_needs_an_explicit_decision,
         test_translation_for_unknown_field_is_schema_missing,
@@ -840,6 +967,8 @@ def main() -> int:
         test_manifest_contains_only_planned_members,
         test_empty_plan_yields_empty_manifest,
         test_package_split_is_deterministic_and_grouped,
+        test_oversized_existing_object_is_split_by_the_planner,
+        test_new_object_customobject_precedes_oversized_field_parts,
         test_performance_100_objects_200_fields,
         test_generation_is_linear_in_entries,
         test_single_canonical_entry_point,
@@ -850,6 +979,8 @@ def main() -> int:
         test_existing_object_meta_is_patched_not_rebuilt,
         test_patched_object_payload_excludes_org_fields,
         test_approved_name_drift_is_written_into_object_meta,
+        test_approved_name_drift_preserves_org_label_when_sheet_label_blank,
+        test_blank_autonumber_name_format_is_a_hard_error,
         test_approved_drift_generates_only_the_changed_field,
         test_parked_translation_conflict_is_a_validation_error,
     ):
