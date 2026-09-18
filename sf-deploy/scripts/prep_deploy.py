@@ -197,12 +197,24 @@ def object_list(temp_path: Path) -> list[str]:
 
 
 def validation_error_count() -> int:
+    """ERROR count from the validation report.
+
+    Raises instead of returning a sentinel when the report is absent or
+    unreadable: "we could not read the gate" is a different situation from
+    "the gate counted N errors", and reporting it as a count produced the
+    nonsensical "-1 ERROR(s)" message.
+    """
     if not VALIDATION_REPORT.exists():
-        return -1
+        raise SystemExit(
+            f"⛔ validate_sheet.py wrote no report at {VALIDATION_REPORT} — the "
+            f"validation gate could not be evaluated, so the build stops. Check "
+            f"the validator output above (it exited before writing).")
     try:
-        return int(json.loads(VALIDATION_REPORT.read_text()).get("counts", {}).get("ERROR", 0))
-    except Exception:
-        return -1
+        data = json.loads(VALIDATION_REPORT.read_text(encoding="utf-8"))
+        return int(data["counts"]["ERROR"])
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+        raise SystemExit(f"⛔ validation report {VALIDATION_REPORT} is unreadable "
+                         f"({e}) — cannot confirm the gate passed.")
 
 
 def attr_drift_phase(args, temp_path: Path, objs: list[str],

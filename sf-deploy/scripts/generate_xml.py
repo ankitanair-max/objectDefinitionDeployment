@@ -7,8 +7,12 @@ import xml.etree.ElementTree as ET
 NS = "http://soap.sforce.com/2006/04/metadata"
 ET.register_namespace("", NS)
 
-# Output root. Generation is STAGED by default (the orchestrator points this at
-# .build/staging/force-app) so a build never mutates the tracked force-app tree.
+# Output root. Generation is STAGED: the CLI writes under .build/staging so a
+# build never mutates the tracked force-app tree. The module-level default is
+# the legacy in-tree path, which only the ad-hoc `import generate_xml` helpers
+# rely on; every CLI run gets STAGING_DEFAULT unless --source-root says otherwise.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+STAGING_DEFAULT = REPO_ROOT / ".build/staging/force-app/main/default"
 _SOURCE_ROOT = Path("force-app/main/default")
 
 
@@ -826,11 +830,28 @@ def main() -> int:
     ap.add_argument("--in", dest="input", default="temp_updates.json",
                     help="fetch_sheet.py rows JSON (must match the orchestrator's "
                          "--out; never assumed)")
-    ap.add_argument("--source-root", default=str(_SOURCE_ROOT),
-                    help="output root, e.g. .build/staging/force-app/main/default")
+    ap.add_argument("--source-root", default=str(STAGING_DEFAULT),
+                    help="output root (default: the staging tree, so a run never "
+                         "dirties the tracked force-app)")
     ap.add_argument("--plan", default="",
                     help="deploy_plan.json — generate ONLY the planned fields")
+    ap.add_argument("--all-fields", action="store_true",
+                    help="generate EVERY field in --in, ignoring the org delta. "
+                         "Only for local inspection: the output is not a "
+                         "deployable delta.")
     args = ap.parse_args()
+
+    if not args.plan and not args.all_fields:
+        print("⛔ no scope given. Generation is delta-driven: pass the deployment\n"
+              "   plan so only fields the org actually lacks are written.\n\n"
+              "   Normal use — the canonical command does this for you:\n"
+              "     python scripts/prep_deploy.py --org \"<ORG>\" --tabs \"<TABS>\"\n\n"
+              "   Standalone:\n"
+              "     python scripts/generate_xml.py --in <rows.json> \\\n"
+              "         --plan .build/deploy_plan.json [--source-root <dir>]\n\n"
+              "   To generate everything regardless of the org (inspection only):\n"
+              "     ... --all-fields")
+        return 2
 
     input_path = Path(args.input)
     if not input_path.exists():
@@ -850,6 +871,9 @@ def main() -> int:
         rows = plan_filter(rows, plan)
         print(f"plan {args.plan}: generating {len(rows)} of {before} row(s) "
               f"({plan.get('summary', {}).get('newFields', 0)} new field(s))")
+    else:
+        print("⚠️  --all-fields: generating every sheet row with NO org delta. "
+              "This output is for inspection, not for deploy.")
 
     print(f"Processing {len(rows)} row(s) → {objects_root()}")
     process_fields(rows)

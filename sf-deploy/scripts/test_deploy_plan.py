@@ -334,6 +334,82 @@ def test_staged_generation_honours_custom_input_and_plan():
     print("  ok  staged-generation-honours-custom-input-and-plan")
 
 
+def test_bare_generation_is_refused():
+    """No --plan ⇒ refuse: generating every sheet field is not a delta, and the
+    default output root is the staging tree, never the tracked source."""
+    import generate_xml
+
+    assert generate_xml.STAGING_DEFAULT.parts[-4:] == (
+        "staging", "force-app", "main", "default"), generate_xml.STAGING_DEFAULT
+
+    rows = [meta_row(), field_row("TI_Fnt_Qty__c", "数量", "Quantity")]
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        rows_path = tmp / "rows.json"
+        rows_path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+
+        cp = subprocess.run(
+            [sys.executable, str(SCRIPTS / "generate_xml.py"), "--in", str(rows_path)],
+            text=True, capture_output=True, cwd=str(tmp))
+        assert cp.returncode == 2, cp.stdout + cp.stderr
+        assert "no scope given" in cp.stdout
+        assert "prep_deploy.py" in cp.stdout
+        assert not (tmp / "force-app").exists()
+
+        # the escape hatch is explicit and says what it is
+        cp = subprocess.run(
+            [sys.executable, str(SCRIPTS / "generate_xml.py"), "--in", str(rows_path),
+             "--all-fields", "--source-root", str(tmp / "out/main/default")],
+            text=True, capture_output=True, cwd=str(tmp))
+        assert cp.returncode == 0, cp.stdout + cp.stderr
+        assert "not for deploy" in cp.stdout
+        assert (tmp / "out/main/default/objects" / OBJ / "fields"
+                / "TI_Fnt_Qty__c.field-meta.xml").exists()
+    print("  ok  bare-generation-is-refused")
+
+
+def test_validation_report_is_written_on_a_fresh_clone():
+    """validate_sheet.py must create its report directory, and a missing report
+    must read as "gate not evaluated", never as an error COUNT."""
+    import prep_deploy
+
+    rows = [meta_row(), field_row("TI_Fnt_Qty__c", "数量", "Quantity")]
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        rows_path = tmp / "rows.json"
+        rows_path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+        report = tmp / "never/created/validation_report.json"   # no parent dirs
+
+        cp = subprocess.run(
+            [sys.executable, str(SCRIPTS / "validate_sheet.py"),
+             "--in", str(rows_path), "--json", str(report)],
+            text=True, capture_output=True)
+        assert cp.returncode == 0, cp.stdout + cp.stderr
+        assert report.exists(), "the report directory must be created"
+        assert json.loads(report.read_text())["counts"]["ERROR"] == 0
+
+        real = prep_deploy.VALIDATION_REPORT
+        try:
+            prep_deploy.VALIDATION_REPORT = tmp / "absent.json"
+            try:
+                prep_deploy.validation_error_count()
+                raise AssertionError("a missing report must stop the build")
+            except SystemExit as e:
+                assert "could not be evaluated" in str(e), e
+
+            bad = tmp / "bad.json"
+            bad.write_text("{not json", encoding="utf-8")
+            prep_deploy.VALIDATION_REPORT = bad
+            try:
+                prep_deploy.validation_error_count()
+                raise AssertionError("an unreadable report must stop the build")
+            except SystemExit as e:
+                assert "unreadable" in str(e), e
+        finally:
+            prep_deploy.VALIDATION_REPORT = real
+    print("  ok  validation-report-is-written-on-a-fresh-clone")
+
+
 def test_manifest_contains_only_planned_members():
     rows = [meta_row(),
             field_row("TI_Fnt_ProductName__c", "商品名", "Product name"),
@@ -569,6 +645,8 @@ def main() -> int:
         test_plan_carries_immutable_org_id_and_scope,
         test_multiple_languages_plan_separate_members,
         test_staged_generation_honours_custom_input_and_plan,
+        test_bare_generation_is_refused,
+        test_validation_report_is_written_on_a_fresh_clone,
         test_manifest_contains_only_planned_members,
         test_empty_plan_yields_empty_manifest,
         test_package_split_is_deterministic_and_grouped,

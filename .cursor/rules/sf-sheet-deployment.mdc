@@ -30,7 +30,17 @@ scope for a new task without re-confirming.
 
 ## Pipeline (fixed order — never skip the gate)
 
-Working directory is always `sf-deploy/`.
+Working directory is always `sf-deploy/`. **Run the whole chain with the ONE
+canonical command** — it performs every step below, including the object/field
+delta and the translations:
+
+```
+python scripts/prep_deploy.py --org "<ORG>" --tabs "<tab1,tab2>" --phase deploy
+```
+
+The individual scripts below are what that command runs; invoke them by hand
+only for inspection/debugging, and note that the delta-driven ones now REQUIRE
+explicit scope (see step 3).
 
 1. **Fetch** — `python scripts/fetch_sheet.py --spreadsheet-id <ID> [--tabs "<tab1,tab2>"]`
    Produces `temp_updates.json`. Uses the user's Google ADC creds
@@ -39,35 +49,47 @@ Working directory is always `sf-deploy/`.
    - If the report has **any ERROR**, STOP. Do not generate XML, do not build a
      package, do not deploy. Show the user the failing rows and ask them to fix
      the sheet, then re-fetch.
-3. **Generate** — `python scripts/generate_xml.py` → writes `force-app/main/default/objects/**`.
+3. **Org snapshot + plan** — `org_snapshot.py --org <ORG> --objects <A__c,B__c>`
+   (ONE bulk read: existence, existing fields, translations) then
+   `plan_deploy.py --rows temp_updates.json --snapshot .build/org_snapshot.json`
+   → `.build/deploy_plan.json`, the single source of deploy scope.
+4. **Generate (STAGED, delta-scoped)** —
+   `python scripts/generate_xml.py --in temp_updates.json --plan .build/deploy_plan.json`
+   → writes `.build/staging/force-app/main/default/objects/**`; the tracked
+   `force-app` tree is never touched by a build. A bare `generate_xml.py` with
+   no `--plan` is REFUSED (exit 2) because it would write every sheet field
+   rather than the delta; `--all-fields` forces that, for inspection only.
    Japanese `Field Label` only — never write `Field Label (EN)` into `CustomField.label`.
-4. **Translations (when the tab has `Field Label (EN)`)** — `prep_deploy.py` Step 4b
-   (not an optional extra command):
-   `translation_drift.py --new-only` then `generate_object_translation.py`
-   (retrieve-merge org `CustomObjectTranslation` `<Obj>__c-en_US`).
+5. **Translations (when the tab has `Field Label (EN)`)** — the plan already
+   carries the translation delta, and
+   `generate_object_translation.py --snapshot .build/org_snapshot.json --delta
+   .build/deploy_plan.json` patches the new field into the org's OWN
+   `CustomObjectTranslation` tree (no second org read, nothing else dropped).
    Package only `NEW_TRANSLATION`; report `CHANGED_EN`; do not invent English.
-   See `sf-object-translation-deploy.mdc`. Prefer
-   `python scripts/prep_deploy.py --org "<ORG>" --tabs "<tab>"` so 4b is not skipped.
-5. **Build manifest** — `python scripts/build_manifest.py --out manifest/package.xml`
-   (add `--only Obj__c,Obj2__c` for an incremental / partial deploy). Include
-   `CustomObjectTranslation` members produced in step 4.
-6. **Deploy** — `scripts/deploy.py` (see gating below).
-7. **Report** — after a successful real deploy, append/refresh the object's tab in
+   See `sf-object-translation-deploy.mdc`.
+6. **Build manifest FROM THE PLAN** —
+   `python scripts/build_manifest.py --plan .build/deploy_plan.json --out <pkg>`.
+   Never a directory scan: the scan can pick up stale metadata from an earlier
+   run. The plan's members already include the `CustomObjectTranslation`s.
+7. **Deploy** — `scripts/deploy.py` (see gating below), run against the staged
+   project (`--project-dir .build/staging`).
+8. **Verify** — `verify_deploy.py --plan .build/deploy_plan.json` (Tooling API,
+   FLS-independent). The deploy log is never trusted on its own.
+9. **Report** — after a successful real deploy, append/refresh the object's tab in
    `reports/Object_Deployment_Report.xlsx` via `scripts/build_object_report.py`
    (see "Post-deploy report" below).
 
-Steps 1–5 can be run together with:
-`python scripts/prep_deploy.py --org "<ORG>" --tabs "<tab1,tab2>"`
-(`run.py` still covers fetch→validate→generate→manifest but does **not** run
-translation Step 4b — use `prep_deploy.py` for any translated object.)
+`run.py` is a thin alias for `prep_deploy.py --phase build`; it no longer runs a
+pipeline of its own.
 
 ## Incremental deploys
 
-To deploy only changed/new fields (not the whole object), pass `--tabs` to fetch
-just the relevant object tab(s) and `--only <Object__c>` to `build_manifest.py`
-so `package.xml` contains only those components. For deletions, hand-write a
-`deletions.json` and run `build_manifest.py --destroy deletions.json` to emit
-`destructiveChanges.xml`, then deploy with `deploy.py --pre-destructive ...`.
+Incremental is the DEFAULT, not a mode: the plan packages only fields the org
+does not have, so an incremental run is simply the canonical command again. A
+field whose DEFINITION changed is reported as attribute drift and packaged only
+when you opt in per field (`--include-drift Obj__c.Field__c`). For deletions,
+the `IsDelete` rows go through `build_destructive.py` →
+`destructiveChanges.xml`, then `deploy.py --pre-destructive ...`.
 
 ## Org-selection quality gate (MANDATORY before every deploy)
 
