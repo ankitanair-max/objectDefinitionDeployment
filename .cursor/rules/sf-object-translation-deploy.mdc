@@ -17,6 +17,10 @@ https://docs.google.com/spreadsheets/d/1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8u
 Japanese `Field Label` remains `CustomField.label`. Do **not** write `Field Label (EN)`
 into `generate_xml.py` field `<label>`.
 
+`MISSING_TRANSLATION` (blank EN cell) and `SCHEMA_MISSING` (the EN targets a
+field that is neither in the org nor created by this deploy) are DIFFERENT
+defects and must be reported as such; neither is ever packaged.
+
 ## No EN header ⇒ the whole translation step is SKIPPED (mandatory)
 
 A tab with no `Field Label (EN)` column is untranslated, so the translation
@@ -28,14 +32,30 @@ ordinary field deploy start needing the Translation Workbench.
 
 ## Every object/field deploy (not a separate project)
 
-`prep_deploy.py` Step 4b runs after field XML whenever the tab HAS the EN header:
+Translations are part of the ONE canonical command — there is no separate
+operator step:
 
-1. `translation_drift.py --rows temp_updates.json --org <ORG> --lang <LANG> --new-only`
-2. `generate_object_translation.py --rows … --lang <LANG> --delta …` — read the
-   org `CustomObjectTranslation` `<Obj>__c-<LANG>` and **patch** the new field
-   into it, so sibling translations are not wiped.
-3. The member `CustomObjectTranslation:<Obj>__c-<LANG>` rides in the **same**
-   package as the CustomField delta.
+```
+python scripts/prep_deploy.py --org "<ORG>" --tabs "<TABS>" --phase deploy
+```
+
+The translation delta is computed from the **single org snapshot**
+(`.build/org_snapshot.json`) that the orchestrator already took for the
+object/field delta, and it is recorded in the **deployment plan**
+(`.build/deploy_plan.json`) alongside the field members:
+
+1. `org_snapshot.py` reads every target object's `CustomObjectTranslation` ONCE
+ in bulk (`ceil(N/10)` readMetadata calls for N objects) and keeps the raw
+ record XML.
+2. `plan_deploy.py` classifies the sheet's EN against that snapshot and writes
+ the `CustomObjectTranslation:<Obj>__c-<LANG>` members into the plan.
+3. `generate_object_translation.py --snapshot … --delta <plan>` patches the new
+ field into the org's OWN element tree — **no second org read per object**
+ (that duplication was ~`ceil(N/10) + N` calls) — and stages the result under
+ `.build/staging/force-app`.
+4. The COT member rides in the **same** plan-built package as the CustomField
+ delta, and its hash is recorded in the sync state **only after**
+ `verify_deploy.py` confirms the deploy landed.
 
 `--lang` defaults to `en_US` and is a `prep_deploy.py` flag (`--lang off` skips
 translations entirely). Only the selected language directory
@@ -47,6 +67,7 @@ in the tree are left untouched.
 | `NEW_TRANSLATION` | EN filled, no `<LANG>` translation in the org | **Yes — automatic** |
 | `CHANGED_EN` | Org EN ≠ sheet EN | **Report only.** Redeploy only if the user asks. |
 | `MISSING_TRANSLATION` | Deployable custom field, EN blank | WARN; deploy JA field; **do not invent English** |
+| `SCHEMA_MISSING` | EN targets a field absent from the org AND from this deploy | **No.** The COT member would fail on an unknown field — report it. |
 | `PARSE_ERROR` | EN cell cannot be parsed (e.g. picklist EN count ≠ JA count) | **No — validation ERROR.** Fix the sheet; never silently degrade to MISSING. |
 | `INVALID_LANG` | Language code is not a Translation Workbench code | **No — validation ERROR.** |
 

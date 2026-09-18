@@ -39,6 +39,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, "scripts")
+from translation_lib import InvalidApiName, soql_name  # noqa: E402
 from fetch_sheet import (  # noqa: E402
     get_sheets_service, find_header_row, find_helper_cols, build_col_map,
     norm, GRAY_GUARD_SUBSTR, is_field_list_end, WIP_TRUE, DELETE_TRUE,
@@ -105,6 +106,11 @@ def _object_api(grid: list[list], hidx: int, col_map: dict) -> str:
 
 def org_has_field(target_org: str, obj: str, field: str) -> bool:
     dev = field[:-3] if field.endswith("__c") else field
+    try:
+        obj, dev = soql_name(obj), soql_name(dev)
+    except InvalidApiName as e:
+        print(f"  ⚠️  {e} — refusing to query for it")
+        return False
     q = ("SELECT DeveloperName FROM CustomField WHERE "
          f"EntityDefinition.QualifiedApiName='{obj}' AND DeveloperName='{dev}'")
     try:

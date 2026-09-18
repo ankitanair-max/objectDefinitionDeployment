@@ -28,11 +28,13 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import org_snapshot  # noqa: E402
 from translation_lib import (  # noqa: E402
     BUILD_DIR, CHANGED, CONFLICT, DEFAULT_LANG, DEFAULT_SYNC_STATE, INVALID_LANG,
     KIND_OBJECT_FIELD, KIND_OBJECT_HELP, KIND_OBJECT_LABEL, KIND_OBJECT_PICKLIST,
     KIND_OBJECT_REL, KIND_NAME_FIELD, MISSING, NEW, ORG_ONLY, PARSE_ERROR,
-    UNCHANGED, OrgAuthError, TranslationUnavailable, apply_new_only, classify,
+    SCHEMA_MISSING, UNCHANGED, OrgAuthError, TranslationUnavailable,
+    apply_new_only, classify,
     entries_from_object_rows, has_translation_columns, load_sync_state, org_auth,
     parse_object_translation, read_object_translations,
 )
@@ -78,6 +80,9 @@ def main() -> int:
     ap.add_argument("--sync-state", default=DEFAULT_SYNC_STATE)
     ap.add_argument("--out", default=str(BUILD_DIR / "translation_drift.json"))
     ap.add_argument("--fail-on-conflict", action="store_true")
+    ap.add_argument("--snapshot", default="",
+                    help="org_snapshot.json — classify against the ONE bulk org "
+                         "read instead of querying again")
     ap.add_argument("--on-unavailable", choices=["error", "skip"], default="error",
                     help="org without Translation Workbench / the language active: "
                          "fail with an actionable message (default) or report an "
@@ -102,22 +107,47 @@ def main() -> int:
     sheet = [e for e in sheet if e.get("language", args.lang) == args.lang]
     print(f"translation_drift  org={args.org}  lang={args.lang}  sheet={len(sheet)}")
 
-    try:
-        auth = org_auth(args.org)
-    except OrgAuthError as e:
-        print(f"❌ {e}")
-        return 1
-    try:
-        org_by_id = org_index(sheet, args.lang, auth)
-    except TranslationUnavailable as e:
-        if args.on_unavailable == "error":
+    org_schema = None
+    if args.snapshot:
+        snapshot = org_snapshot.load(args.snapshot)
+        state = snapshot.get("translationState")
+        if state not in ("ok", "off"):
+            note = snapshot.get("translationNote") or state
+            if args.on_unavailable == "error":
+                print(f"❌ translations unavailable: {note}")
+                return 3
+            print(f"⏭  translations skipped — {note}")
+            write_delta(args.out, [])
+            return 0
+        org_id = (snapshot.get("target") or {}).get("orgId", "")
+        org_schema = org_snapshot.org_schema(snapshot)
+        org_by_id = {}
+        for obj in sorted({e["component"] for e in sheet}):
+            rec = org_snapshot.translation_record(snapshot, obj)
+            if rec is not None:
+                org_by_id.update(parse_object_translation(rec, obj, args.lang))
+        print(f"  org CustomObjectTranslation {args.lang}: {len(org_by_id)} key(s) "
+              f"(from snapshot)")
+    else:
+        try:
+            auth = org_auth(args.org)
+        except OrgAuthError as e:
             print(f"❌ {e}")
-            return 3
-        print(f"⏭  translations skipped — {e}")
-        write_delta(args.out, [])
-        return 0
-    sync = load_sync_state(args.sync_state, org_id=auth.get("orgId", "")).get("entries") or {}
-    classified = classify(sheet, org_by_id, sync, conflict_policy=args.conflict)
+            return 1
+        try:
+            org_by_id = org_index(sheet, args.lang, auth)
+        except TranslationUnavailable as e:
+            if args.on_unavailable == "error":
+                print(f"❌ {e}")
+                return 3
+            print(f"⏭  translations skipped — {e}")
+            write_delta(args.out, [])
+            return 0
+        org_id = auth.get("orgId", "")
+
+    sync = load_sync_state(args.sync_state, org_id=org_id).get("entries") or {}
+    classified = classify(sheet, org_by_id, sync, conflict_policy=args.conflict,
+                          org_schema=org_schema)
     if args.new_only:
         classified = apply_new_only(classified)
 
@@ -132,7 +162,7 @@ def main() -> int:
     print(f"  NEW={counts[NEW]}  CHANGED={counts[CHANGED]}  UNCHANGED={counts[UNCHANGED]}  "
           f"MISSING={counts[MISSING]}  CONFLICT={counts[CONFLICT]}  "
           f"ORG_ONLY={counts[ORG_ONLY]}  INVALID_LANG={counts[INVALID_LANG]}  "
-          f"PARSE_ERROR={counts[PARSE_ERROR]}")
+          f"PARSE_ERROR={counts[PARSE_ERROR]}  SCHEMA_MISSING={counts[SCHEMA_MISSING]}")
     print(f"  packaging {packaged} translation(s)  conflict policy={args.conflict}")
     print("=" * 88)
     for c in classified:

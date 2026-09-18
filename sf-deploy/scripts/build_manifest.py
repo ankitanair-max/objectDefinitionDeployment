@@ -159,8 +159,62 @@ def render_destructive(deletions: dict[str, list[str]], api_version: str) -> str
     return "\n".join(lines) + "\n"
 
 
+def object_of(mtype: str, member: str) -> str:
+    """The object a member belongs to, so splits never separate an object from
+    its own fields and translations."""
+    if mtype == "CustomField" or mtype == "RecordType":
+        return member.split(".", 1)[0]
+    if mtype == "CustomObjectTranslation":
+        return member.rsplit("-", 1)[0]
+    if mtype == "Layout":
+        return member.split("-", 1)[0]
+    return member
+
+
+def split_members(members: dict[str, list[str]], max_components: int
+                  ) -> list[dict[str, list[str]]]:
+    """Split a member set into deterministic packages under the component cap.
+
+    Grouping is by object, so an object, its new fields and its translations
+    always deploy together in the same package (a field can't land in package 2
+    while its object waits in package 1).
+    """
+    total = sum(len(v) for v in members.values())
+    if max_components <= 0 or total <= max_components:
+        return [members] if total else []
+
+    by_object: dict[str, dict[str, list[str]]] = {}
+    for mtype in TYPE_ORDER:
+        for m in members.get(mtype, []):
+            by_object.setdefault(object_of(mtype, m), {}).setdefault(mtype, []).append(m)
+
+    packages: list[dict[str, list[str]]] = []
+    current: dict[str, list[str]] = {}
+    count = 0
+    for obj in sorted(by_object):
+        group = by_object[obj]
+        size = sum(len(v) for v in group.values())
+        if count and count + size > max_components:
+            packages.append(current)
+            current, count = {}, 0
+        for mtype, vals in group.items():
+            current.setdefault(mtype, []).extend(vals)
+        count += size
+    if current:
+        packages.append(current)
+    return [{k: sorted(v) for k, v in sorted(p.items(),
+                                             key=lambda kv: TYPE_ORDER.index(kv[0]))}
+            for p in packages]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Build package.xml / destructiveChanges.xml")
+    ap.add_argument("--plan", default="",
+                    help="deploy_plan.json — take the members from the PLAN "
+                         "instead of scanning the source tree (authoritative)")
+    ap.add_argument("--max-components", type=int, default=9000,
+                    help="component cap per package (Metadata API allows 10000); "
+                         "larger plans split deterministically into package.partN.xml")
     ap.add_argument("--source-root", default="force-app/main/default")
     ap.add_argument("--out", default="manifest/package.xml")
     ap.add_argument("--api-version", default="")
@@ -175,22 +229,46 @@ def main() -> int:
     source_root = Path(args.source_root)
     only = {o.strip() for o in args.only.split(",") if o.strip()} or None
 
-    if not source_root.is_dir():
-        print(f"❌ source root '{source_root}' not found — run the generators first.")
-        return 1
+    if args.plan:
+        plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
+        members = {k: sorted(v) for k, v in (plan.get("manifestMembers") or {}).items()}
+        source = f"plan {args.plan}"
+    else:
+        if not source_root.is_dir():
+            print(f"❌ source root '{source_root}' not found — run the generators first.")
+            return 1
+        members = discover(source_root, only)
+        source = f"source scan {source_root}"
 
-    members = discover(source_root, only)
     total = sum(len(v) for v in members.values())
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render_package(members, api_version), encoding="utf-8")
 
-    print(f"📦 package.xml  ->  {out}   (api {api_version})")
+    packages = split_members(members, args.max_components)
+    if len(packages) <= 1:
+        out.write_text(render_package(members, api_version), encoding="utf-8")
+        written = [out]
+    else:
+        written = []
+        for i, part in enumerate(packages, 1):
+            p = out.with_name(f"{out.stem}.part{i}{out.suffix}")
+            p.write_text(render_package(part, api_version), encoding="utf-8")
+            written.append(p)
+        # keep --out valid as the first part so callers never deploy a stale file
+        out.write_text(render_package(packages[0], api_version), encoding="utf-8")
+
+    print(f"📦 package.xml  ->  {', '.join(str(p) for p in written)}   "
+          f"(api {api_version}, from {source})")
     for mtype in TYPE_ORDER:
         if members.get(mtype):
-            print(f"     {mtype:14} {len(members[mtype])}")
+            print(f"     {mtype:26} {len(members[mtype])}")
+    if len(packages) > 1:
+        print(f"   ⚠️  {total} components exceed --max-components "
+              f"{args.max_components}: split into {len(packages)} package(s); "
+              f"deploy them in order.")
     if total == 0:
-        print("   ⚠️  no metadata discovered under source root.")
+        print("   ⚠️  no members — nothing to deploy (empty delta)."
+              if args.plan else "   ⚠️  no metadata discovered under source root.")
 
     if args.destroy:
         try:

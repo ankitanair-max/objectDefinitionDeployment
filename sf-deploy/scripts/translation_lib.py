@@ -137,6 +137,42 @@ def truthy(v) -> bool:
     return norm(v).lower() in WIP_TRUE
 
 
+# --------------------------------------------------------------------------- #
+# SOQL safety + batching
+# --------------------------------------------------------------------------- #
+
+API_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(__c|__C|__r|__mdt|__e|__b|__x)?$")
+
+
+class InvalidApiName(ValueError):
+    """A value bound for a SOQL literal is not a Salesforce API name."""
+
+
+def soql_name(value: str) -> str:
+    """Validate an API name for use inside a SOQL string literal.
+
+    API names cannot legally contain quotes or backslashes, so anything that
+    does is rejected outright rather than escaped — an unexpected value is a
+    bug or an injection attempt, not something to smuggle into the query.
+    """
+    v = norm(value)
+    if not v or len(v) > 80 or not API_NAME_RE.match(v):
+        raise InvalidApiName(f"not a Salesforce API name: {value!r}")
+    return v
+
+
+def soql_in_list(values: list[str]) -> str:
+    """Render a validated ``IN ('a','b')`` value list."""
+    return ",".join(f"'{soql_name(v)}'" for v in values)
+
+
+def chunks(items: list, size: int) -> list[list]:
+    """Split a list into deterministic batches (SOQL IN / readMetadata limits)."""
+    if size <= 0:
+        raise ValueError("chunk size must be positive")
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
 def is_delete(v) -> bool:
     return norm(v).lower() in DELETE_TRUE
 
@@ -325,12 +361,31 @@ def entries_from_object_rows(rows: list[dict], lang: str = DEFAULT_LANG) -> list
 # Delta classification
 # --------------------------------------------------------------------------- #
 
+def target_key(entry: dict) -> str:
+    """`Obj__c.Field__c` the translation is attached to (object label → Obj__c)."""
+    comp = norm(entry.get("component"))
+    if entry.get("kind") in {KIND_OBJECT_LABEL, KIND_NAME_FIELD}:
+        return comp
+    field = norm(entry.get("field")) or norm(entry.get("key")).split("::", 1)[0]
+    return f"{comp}.{field}" if field else comp
+
+
 def classify(sheet_entries: list[dict], org_by_id: dict[str, dict],
              sync_by_id: dict[str, dict] | None = None,
-             conflict_policy: str = "park") -> list[dict]:
+             conflict_policy: str = "park",
+             org_schema: dict[str, set[str]] | None = None,
+             planned_fields: dict[str, set[str]] | None = None) -> list[dict]:
     """Classify each sheet entry against live org (+ optional last-deploy hashes).
 
     conflict_policy: park | sheet-wins | org-wins
+
+    org_schema      {object: {existing field API names}} from the org snapshot.
+    planned_fields  {object: {field API names this deploy creates}}.
+
+    A translation whose TARGET field exists neither in the org nor in this
+    deploy is SCHEMA_MISSING — a different problem from a blank EN cell
+    (MISSING_TRANSLATION), and it must not be packaged: the COT member would
+    fail on an unknown field.
     """
     sync_by_id = sync_by_id or {}
     seen = set()
@@ -356,6 +411,18 @@ def classify(sheet_entries: list[dict], org_by_id: dict[str, dict],
             rec["reason"] = e["lang_error"]
             out.append(rec)
             continue
+        if org_schema is not None and org is None:
+            tgt = target_key(e)
+            if "." in tgt:
+                obj, field = tgt.split(".", 1)
+                if not (field in (org_schema.get(obj) or set())
+                        or field in ((planned_fields or {}).get(obj) or set())):
+                    rec["code"] = SCHEMA_MISSING
+                    rec["package"] = False
+                    rec["reason"] = (f"target field {tgt} is neither in the org nor "
+                                     f"created by this deploy")
+                    out.append(rec)
+                    continue
         if not e["translation"]:
             rec["code"] = MISSING
             rec["package"] = False
@@ -492,11 +559,40 @@ def esc(s: str) -> str:
     return sx.escape(norm(s), {"'": "&apos;", '"': "&quot;"})
 
 
+def localize(el: ET.Element) -> ET.Element:
+    """Strip namespaces from an already-PARSED tree (namespace-aware).
+
+    The XML parser resolves prefixes, so tags arrive as ``{uri}local``; we drop
+    the URI in place. This replaces the old regex namespace scrubbing, which
+    corrupted any element text that happened to contain ``<prefix:`` or an
+    ``xmlns=`` string.
+    """
+    for node in el.iter():
+        if isinstance(node.tag, str) and node.tag.startswith("{"):
+            node.tag = node.tag.split("}", 1)[1]
+        for name in [a for a in node.attrib if a.startswith("{")]:
+            node.attrib[name.split("}", 1)[1]] = node.attrib.pop(name)
+    return el
+
+
+def parse_soap(xml: str) -> ET.Element:
+    """Parse a SOAP response namespace-aware; raise on a SOAP fault."""
+    try:
+        root = localize(ET.fromstring(xml))
+    except ET.ParseError as e:
+        raise MetadataApiError(f"malformed SOAP response: {e}") from e
+    fault = root.find(".//faultstring")
+    if fault is not None and norm(fault.text):
+        raise MetadataApiError(norm(fault.text)[:600])
+    return root
+
+
 def strip_soap_ns(xml: str) -> str:
-    xml = re.sub(r'\sxmlns(:\w+)?="[^"]*"', "", xml)
-    xml = re.sub(r"<(/?)\w+:", r"<\1", xml)
-    xml = re.sub(r"\s\w+:(\w+=)", r" \1", xml)
-    return xml
+    """Deprecated: kept for callers that need a namespace-free XML *string*.
+
+    Prefer parse_soap()/localize(), which let the XML parser handle namespaces.
+    """
+    return ET.tostring(localize(ET.fromstring(xml)), encoding="unicode")
 
 
 def write_xml(path: Path, root_xml: str) -> None:
@@ -579,11 +675,21 @@ def read_metadata(mtype: str, full_names: list[str], tok: str, inst: str,
         except urllib.error.HTTPError as e:
             raise MetadataApiError(
                 f"readMetadata {mtype} HTTP {e.code}: {e.read().decode()[:600]}")
-        root = ET.fromstring(strip_soap_ns(xml))
-        fault = root.find(".//faultstring")
-        if fault is not None and norm(fault.text):
-            raise MetadataApiError(f"readMetadata {mtype}: {norm(fault.text)[:600]}")
-        for rec in root.findall(".//records"):
+        except urllib.error.URLError as e:
+            raise MetadataApiError(
+                f"readMetadata {mtype}: cannot reach {inst} ({e.reason})")
+        try:
+            root = parse_soap(xml)
+        except MetadataApiError as e:
+            raise MetadataApiError(f"readMetadata {mtype}: {e}") from e
+        found = root.findall(".//records")
+        if not found:
+            # A readMetadata that answers with neither records nor a fault is a
+            # partial/unexpected response — never silently read as "absent".
+            raise MetadataApiError(
+                f"readMetadata {mtype}: response carried no <records> for "
+                f"{', '.join(chunk)}")
+        for rec in found:
             if rec.find("fullName") is not None or rec.find("fields") is not None:
                 records.append(rec)
     return records
@@ -597,6 +703,31 @@ _UNAVAILABLE_HINTS = (
     "invalid language",
     "language is not",
 )
+
+
+def index_entries(entries: list[dict]) -> dict[str, dict]:
+    """Group translation entries ONCE: {object: {"object": [...], "fields": {...}}}.
+
+    Generation is then a single pass over indexed dictionaries instead of
+    re-scanning every entry per field (which is quadratic on a 200-field
+    object). Field keys are sorted so repeated runs emit identical files.
+    """
+    idx: dict[str, dict] = {}
+    for e in entries:
+        obj = norm(e.get("component"))
+        if not obj:
+            continue
+        bucket = idx.setdefault(obj, {"object": [], "fields": {}})
+        if e["kind"] in {KIND_OBJECT_LABEL, KIND_NAME_FIELD}:
+            bucket["object"].append(e)
+            continue
+        field = norm(e.get("field")) or norm(e.get("key")).split("::", 1)[0]
+        if not field:
+            continue
+        bucket["fields"].setdefault(field, []).append(e)
+    for bucket in idx.values():
+        bucket["fields"] = {k: bucket["fields"][k] for k in sorted(bucket["fields"])}
+    return dict(sorted(idx.items()))
 
 
 def read_object_translations(objs: list[str], lang: str, auth: dict) -> list[ET.Element]:

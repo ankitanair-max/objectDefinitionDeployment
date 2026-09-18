@@ -352,8 +352,11 @@ def parse_tab(title: str, grid: list[list], object_api_hint: str = "") -> list[d
     rows: list[dict] = []
     field_rows: list[dict] = []
     name_field = {}
-    wip_skipped = 0
-    delete_skipped = 0
+    # Skipped rows never enter the field list (generate_xml must not see them),
+    # but the deployment plan has to REPORT them, so their API names ride on the
+    # object-meta row: WIP = ignore entirely, IsDelete = destructive set.
+    wip_rows: list[str] = []
+    delete_rows: list[str] = []
 
     def cell_at(cells, key):
         idx = helper[key]
@@ -378,12 +381,14 @@ def parse_tab(title: str, grid: list[list], object_api_hint: str = "") -> list[d
             continue
         # WIP gate: skip rows flagged true/x in the WIP column (AE) — work in progress
         if cell_at(cells, "wip").lower() in WIP_TRUE:
-            wip_skipped += 1
+            wip_rows.append(norm(rec.get("Field API Name"))
+                            or f"<{norm(rec.get('Field Label')) or 'unnamed'}>")
             continue
         # IsDelete gate: a deletion request (AD) is excluded from the create package
         # (routed to the destructive DELETE flow; see sf-deploy-delta-and-blockers).
         if cell_at(cells, "isdelete").lower() in DELETE_TRUE:
-            delete_skipped += 1
+            delete_rows.append(norm(rec.get("Field API Name"))
+                               or f"<{norm(rec.get('Field Label')) or 'unnamed'}>")
             continue
         # capture Name field for the object's <nameField>
         if norm(rec.get("Field API Name")) == "Name":
@@ -398,14 +403,16 @@ def parse_tab(title: str, grid: list[list], object_api_hint: str = "") -> list[d
 
     obj_meta.update(name_field)
     obj_meta[EN_FLAG] = has_en
+    obj_meta["_WipSkipped"] = wip_rows
+    obj_meta["_DeleteRequested"] = delete_rows
     obj_meta.setdefault("_SheetName", title)
     if obj_api:
         rows.append(obj_meta)
     else:
         print(f"  ⚠️  {title}: Object API Name not found (header blank & no index hint).")
     rows.extend(field_rows)
-    wip_note = f", {wip_skipped} WIP(AE) skipped" if wip_skipped else ""
-    del_note = f", {delete_skipped} IsDelete(AD) excluded" if delete_skipped else ""
+    wip_note = f", {len(wip_rows)} WIP(AE) skipped" if wip_rows else ""
+    del_note = f", {len(delete_rows)} IsDelete(AD) excluded" if delete_rows else ""
     print(f"  ✓ {title}: {len(field_rows)} field(s){wip_note}{del_note}, object_api='{obj_api or '?'}'")
     return rows
 

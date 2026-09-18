@@ -142,6 +142,11 @@ def main() -> int:
     ap.add_argument("--tests", default="", help="comma-separated tests for RunSpecifiedTests")
     ap.add_argument("--start", action="store_true", help="REAL deploy (gated). Default is check-only validate.")
     ap.add_argument("--validation-report", default=".build/validation_report.json")
+    ap.add_argument("--project-dir", default="",
+                    help="run the sf CLI from this SFDX project (staged builds "
+                         "live in .build/staging); default: current directory")
+    ap.add_argument("--log", default=".build/last_deploy.log",
+                    help="deploy log path; the failure context is written next to it")
     ap.add_argument("--skip-validation-gate", action="store_true")
     ap.add_argument("--wait", type=int, default=60)
     ap.add_argument("--ignore-conflicts", action="store_true",
@@ -161,7 +166,7 @@ def main() -> int:
         print_org_table(orgs)
         return 0
 
-    pkg = Path(args.package)
+    pkg = Path(args.package).resolve() if Path(args.package).exists() else Path(args.package)
     if not pkg.exists():
         print(f"❌ package manifest '{pkg}' not found — run build_manifest.py first.")
         return 1
@@ -218,11 +223,17 @@ def main() -> int:
     if args.ignore_conflicts:
         cmd.append("--ignore-conflicts")
 
+    workdir = Path(args.project_dir).resolve() if args.project_dir else None
+    if workdir and not (workdir / "sfdx-project.json").exists():
+        print(f"❌ '{workdir}' is not an SFDX project (no sfdx-project.json).")
+        return 1
+
     banner = "REAL DEPLOY (writes to org)" if args.start else "CHECK-ONLY VALIDATION (no org writes)"
     print("=" * 72)
     print(f"  {banner}")
     print(f"  org        : {org}")
     print(f"  manifest   : {pkg}")
+    print(f"  project    : {workdir or Path.cwd()}")
     print(f"  test level : {args.test_level}")
     print(f"  command    : {' '.join(cmd)}")
     print("=" * 72)
@@ -231,17 +242,17 @@ def main() -> int:
         print("(dry-run) not executing.")
         return 0
 
-    logpath = Path(".build/last_deploy.log")
-    rc = _run_tee(cmd, logpath)
+    logpath = Path(args.log)
+    rc = _run_tee(cmd, logpath, cwd=workdir)
 
     mode_label = "start" if args.start else "validate (dry-run)"
     if rc != 0:
         _write_failure_context(logpath, cmd, org, mode_label, rc)
-        _auto_log_failure()
+        _auto_log_failure(logpath.parent / "last_deploy_failure.json")
         print("\n" + "─" * 72)
         print(f"❌ Deploy {mode_label} FAILED (exit {rc}).")
         print(f"   Full log : {logpath}")
-        print(f"   Context  : .build/last_deploy_failure.json")
+        print(f"   Context  : {logpath.parent / 'last_deploy_failure.json'}")
         print("   → A DRAFT lesson was auto-written to .cursor/deployment_knowledge.md.")
         print("     Run the SELF-CORRECTION loop: diagnose the root cause, fix the")
         print("     generator/validation, COMPLETE the draft, and flip its Status")
@@ -249,26 +260,26 @@ def main() -> int:
     return rc
 
 
-def _auto_log_failure() -> None:
+def _auto_log_failure(context: Path) -> None:
     """Auto-append a DRAFT self-correction lesson so the KB update is never
     forgotten. Never raises into the caller (logging must not mask the failure)."""
     try:
         script = Path(__file__).with_name("log_failure.py")
-        subprocess.run([sys.executable, str(script),
-                        "--context", ".build/last_deploy_failure.json"],
+        subprocess.run([sys.executable, str(script), "--context", str(context)],
                        timeout=30)
     except Exception as e:
         print(f"⚠️  auto-log of failure lesson skipped: {e}")
 
 
-def _run_tee(cmd: list[str], logpath: Path) -> int:
+def _run_tee(cmd: list[str], logpath: Path, cwd: Path | None = None) -> int:
     """Run a command, streaming output live to console AND a log file."""
     logpath.parent.mkdir(parents=True, exist_ok=True)
     try:
         with logpath.open("w", encoding="utf-8") as lf:
             lf.write(f"# command: {' '.join(cmd)}\n")
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, text=True, bufsize=1)
+                                    stderr=subprocess.STDOUT, text=True, bufsize=1,
+                                    cwd=str(cwd) if cwd else None)
             assert proc.stdout is not None
             for line in proc.stdout:
                 sys.stdout.write(line)
@@ -295,6 +306,7 @@ def _write_failure_context(logpath: Path, cmd: list[str], org: str,
                                   "insufficient", "duplicate", "cannot")):
             failures.append(line.strip())
     err_codes = sorted(set(re.findall(r"\b[A-Z][A-Z_]{4,}\b", text)))
+    ctxpath = logpath.parent / "last_deploy_failure.json"
     ctx = {
         "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
         "mode": mode,
@@ -305,8 +317,7 @@ def _write_failure_context(logpath: Path, cmd: list[str], org: str,
         "extracted_failures": failures[:50],
         "possible_error_codes": err_codes[:30],
     }
-    Path(".build/last_deploy_failure.json").write_text(
-        json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
+    ctxpath.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":

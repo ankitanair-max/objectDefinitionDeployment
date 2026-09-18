@@ -1,7 +1,34 @@
 #!/usr/bin/env python3
 """
-prep_deploy.py — One-command, gated, BATCH orchestrator for the
-Sheet -> validate -> generate -> package -> deploy -> verify -> report pipeline.
+prep_deploy.py — THE CANONICAL DEPLOY ENTRY POINT.
+
+This is the ONE command that deploys sheet-defined objects, fields AND their
+object translations. `deploy.py` is a low-level sf wrapper (no plan, no
+translations) and `run.py` now delegates here; neither is a deployment entry
+point on its own.
+
+    python scripts/prep_deploy.py --org "<TARGET_ORG>" \
+        --tabs "<OBJECT_TABS>" --phase deploy
+
+Pipeline (one pass, in this order — nothing recomputes scope on its own):
+
+    live sheet fetch
+      → static validation (hard gate)
+      → ONE target-org snapshot        (.build/org_snapshot.json)
+      → attribute drift (existing objects)
+      → deployment plan / delta        (.build/deploy_plan.json)
+      → staged metadata generation     (.build/staging/force-app)
+      → one explicit manifest FROM THE PLAN
+      → check-only deployment
+      → real deployment                (--phase deploy)
+      → live post-deployment verification
+      → verified translation state + report refresh
+
+Delta rules: a new object ships the CustomObject, all its deployable fields and
+all applicable new translations; an EXISTING object ships only fields the org
+does not have. Fields that already exist are never silently redeployed —
+attribute drift is reported and needs `--include-drift Obj__c.Field__c`. WIP
+rows are ignored; IsDelete rows stay in the separate destructive flow.
 
 It runs the whole chain for one OR many object tabs in a single invocation while
 keeping EVERY existing safety gate in place:
@@ -20,15 +47,18 @@ together, packaged into ONE manifest, and deployed in ONE `deploy start`, then
 verified + reported per object. N CLI round-trips collapse to ~1.
 
 Two phases:
-  --phase build   (default, NO org writes): fetch, patch, validate, generate,
-                  manifest, existence pre-check, and a check-only dry-run.
-  --phase deploy  (GATED): re-runs build steps (idempotent) then the REAL
+  --phase build   (default, NO org writes): fetch, validate, snapshot, drift,
+                  plan, staged generation, manifest, check-only dry-run.
+  --phase deploy  re-runs the build steps (idempotent) then the REAL
                   `deploy start`, live verification, and report refresh.
 
-Object translations ride along automatically (step 4b) for tabs that have a
+Object translations ride along automatically for tabs that have a
 `Field Label (EN)` column; tabs without one are untranslated and the step is
 skipped, so a plain field deploy needs no Translation Workbench. `--lang`
 selects the Translation Workbench language (default en_US, `off` to skip).
+
+Re-running with no sheet changes is a no-op by design: the plan comes out empty,
+no package is built and no org write is attempted.
 
 Authentication is whatever the Salesforce CLI is already authorized with for
 `--org`; `--sf-home` / `--xdg-data-home` are opt-in sandbox overrides.
@@ -54,7 +84,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from translation_lib import (  # noqa: E402
-    DEFAULT_LANG, has_translation_columns, normalize_lang,
+    DEFAULT_LANG, normalize_lang, save_sync_state,
 )
 
 DEFAULT_SHEET_ID = "1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ"
@@ -62,13 +92,31 @@ DEFAULT_SHEET_ID = "1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ"
 # Anchored on this file, so the orchestrator behaves the same from any cwd.
 SCRIPTS = Path(__file__).resolve().parent
 ROOT = SCRIPTS.parent
-SOURCE_ROOT = ROOT / "force-app/main/default"
-OBJECTS_ROOT = SOURCE_ROOT / "objects"
-TRANSLATIONS_ROOT = SOURCE_ROOT / "objectTranslations"
+# Generation is STAGED: a build never mutates the tracked force-app tree, and a
+# stale artifact from an earlier run can never leak into a package.
+STAGING = ROOT / ".build/staging"
+STAGING_ROOT = STAGING / "force-app/main/default"
+STAGING_TRANSLATIONS = STAGING_ROOT / "objectTranslations"
 VALIDATION_REPORT = ROOT / ".build/validation_report.json"
-TRANSLATION_DELTA = ROOT / ".build/translation_drift_objects.json"
-PACKAGE = ROOT / "manifest/package.xml"
+SNAPSHOT = ROOT / ".build/org_snapshot.json"
+PLAN = ROOT / ".build/deploy_plan.json"
+SYNC_STATE = ROOT / ".build/translation_sync_state.json"
+PACKAGE = STAGING / "manifest/package.xml"
 LAST_DEPLOY_LOG = ROOT / ".build/last_deploy.log"
+DEFAULT_API_VERSION = "60.0"
+
+
+def init_staging(api_version: str = DEFAULT_API_VERSION) -> None:
+    """A minimal SFDX project around the staged source, so the CLI resolves the
+    manifest against the STAGED tree and not the working copy."""
+    STAGING_ROOT.mkdir(parents=True, exist_ok=True)
+    PACKAGE.parent.mkdir(parents=True, exist_ok=True)
+    (STAGING / "sfdx-project.json").write_text(json.dumps({
+        "packageDirectories": [{"path": "force-app", "default": True}],
+        "namespace": "",
+        "sfdcLoginUrl": "https://test.salesforce.com",
+        "sourceApiVersion": api_version,
+    }, indent=2) + "\n", encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- #
@@ -113,18 +161,8 @@ def run(cmd: list[str], env: dict, *, capture: bool = False, check: bool = True)
     return cp
 
 
-def soql(query: str, args, tooling: bool = False) -> list[dict]:
-    cmd = ["sf", "data", "query", "--query", query, "--target-org", args.org, "--json"]
-    if tooling:
-        cmd.append("--use-tooling-api")
-    cp = subprocess.run(cmd, env=sf_env(args), text=True, capture_output=True)
-    try:
-        data = json.loads(cp.stdout or "{}")
-    except json.JSONDecodeError:
-        raise SystemExit(f"❌ org query parse error:\n{cp.stdout[:300]}\n{cp.stderr[:300]}")
-    if data.get("status") != 0:
-        raise SystemExit(f"❌ org query failed: {data.get('message','unknown')}")
-    return data.get("result", {}).get("records", []) or []
+# Org reads live in org_snapshot.py: the orchestrator queries the org exactly
+# once, and every later step reads that snapshot instead of asking again.
 
 
 # --------------------------------------------------------------------------- #
@@ -167,29 +205,56 @@ def validation_error_count() -> int:
         return -1
 
 
-def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str]]:
+def attr_drift_phase(args, temp_path: Path, objs: list[str],
+                     existing: list[str]) -> None:
+    """Attribute drift for objects that already exist, BEFORE generation.
+
+    A non-zero exit is a FAILED comparison, not a clean one: treating it as
+    "no drift" would silently hide changed field definitions, so the build
+    stops instead.
+    """
+    # drop reports from earlier runs first, so the plan can never read a stale
+    # drift result for an object we did not just compare
+    for o in objs:
+        (ROOT / f".build/attr_drift_{o}.json").unlink(missing_ok=True)
+
+    for o in existing:
+        drift_out = ROOT / f".build/attr_drift_{o}.json"
+        cp = subprocess.run(
+            ["python3", str(SCRIPTS / "attr_drift.py"), "--object", o,
+             "--rows", str(temp_path), "--org", args.org, "--out", str(drift_out)],
+            env=sf_env(args), text=True)
+        if cp.returncode != 0:
+            raise SystemExit(
+                f"⛔ attr_drift.py failed for {o} (exit {cp.returncode}). A failed "
+                f"drift check is NOT a clean one — fix it before deploying, or the "
+                f"build would skip changed field definitions silently.")
+        if not drift_out.exists():
+            raise SystemExit(f"⛔ attr_drift.py wrote no report for {o} — "
+                             f"cannot confirm the object is drift-free.")
+
+
+def build_phase(args, temp_path: Path) -> tuple[dict, dict[str, str]]:
     print("=" * 72)
     print(f"  BUILD PHASE (no org writes)   org={args.org}")
     print("=" * 72)
+    (ROOT / ".build").mkdir(parents=True, exist_ok=True)
 
-    # 1) fetch all target tabs together (Google creds)
-    print("\n[1/6] fetch sheet tabs")
+    # 1) live sheet fetch — all target tabs together (Google creds)
+    print("\n[1/8] fetch sheet tabs (live)")
     run(["python3", str(SCRIPTS / "fetch_sheet.py"),
          "--spreadsheet-id", args.sheet_id, "--tabs", args.tabs,
          "--out", str(temp_path)], google_env(args), capture=True)
-
-    # 2) patch object API names -> __c ; derive object->tab map
-    print("\n[2/6] patch object API names (__c)")
     tab_of = patch_object_apis(temp_path)
     objs = object_list(temp_path)
     if not objs:
         raise SystemExit("❌ no objects parsed from the sheet — check --tabs names.")
     print(f"      objects: {', '.join(objs)}")
 
-    # 3) validation gate (with LIVE referenceTo org-existence check — catches a
+    # 2) validation gate (with LIVE referenceTo org-existence check — catches a
     #    Lookup/MasterDetail pointing at an object that doesn't exist in the org,
     #    e.g. the X__c-vs-XMaster__c shorthand; see KB 2026-08-26).
-    print("\n[3/6] validate (gate: 0 errors, incl. live referenceTo org check)")
+    print("\n[2/8] validate (gate: 0 errors, incl. live referenceTo org check)")
     run(["python3", str(SCRIPTS / "validate_sheet.py"),
          "--in", str(temp_path), "--json", str(VALIDATION_REPORT),
          "--target-org", args.org],
@@ -200,108 +265,129 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str]]:
                          f"See {VALIDATION_REPORT}")
     print("      validation PASS")
 
-    # 4) regenerate metadata for the target objects
-    print("\n[4/6] generate metadata XML")
-    for o in objs:
-        shutil.rmtree(OBJECTS_ROOT / o, ignore_errors=True)
-    run(["python3", str(SCRIPTS / "generate_xml.py")], os.environ.copy(), capture=True)
+    # 3) ONE bulk org snapshot: identity + object existence + existing fields +
+    #    the translation snapshot. Everything downstream reuses this.
+    print("\n[3/8] org snapshot (one bulk read: existence + fields + translations)")
+    run(["python3", str(SCRIPTS / "org_snapshot.py"),
+         "--org", args.org, "--objects", ",".join(objs), "--lang", args.lang,
+         "--on-unavailable", args.on_translation_unavailable,
+         "--out", str(SNAPSHOT)],
+        sf_env(args), capture=True)
+    snapshot = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
+    existing = [o for o, v in snapshot["objects"].items() if v.get("exists")]
 
-    # 4b) CustomObjectTranslation from Field Label (EN) / Object Label (EN)
-    #     on the SAME object tabs — automatic, no extra operator step.
-    #     Tabs with no `Field Label (EN)` column are untranslated: the whole
-    #     step is skipped so an ordinary field deploy never needs the
-    #     Translation Workbench or a translation org call.
-    if args.lang == "off":
-        print("\n[4b] object translations: disabled (--lang off)")
-    elif not has_translation_columns(json.loads(temp_path.read_text(encoding="utf-8"))):
-        print(f"\n[4b] object translations: skipped — no 'Field Label (EN)' column "
-              f"on {args.tabs}")
+    # 4) attribute drift for existing objects — BEFORE generation, so the plan
+    #    can carry it and the operator decides before anything is built.
+    print("\n[4/8] attribute drift (existing objects: sheet definition vs org)")
+    attr_drift_phase(args, temp_path, objs, existing)
+
+    # 5) the PLAN: object/field delta + translation delta + manifest members.
+    print("\n[5/8] deployment plan (delta)")
+    plan_cmd = ["python3", str(SCRIPTS / "plan_deploy.py"),
+                "--rows", str(temp_path), "--snapshot", str(SNAPSHOT),
+                "--sheet-id", args.sheet_id, "--tabs", args.tabs,
+                "--lang", args.lang, "--drift-dir", str(ROOT / ".build"),
+                "--sync-state", str(SYNC_STATE), "--out", str(PLAN)]
+    if args.include_drift:
+        plan_cmd += ["--include-drift", args.include_drift]
+    run(plan_cmd, os.environ.copy(), capture=True)
+    plan = json.loads(PLAN.read_text(encoding="utf-8"))
+
+    if plan["summary"]["empty"]:
+        print("\n" + "-" * 72)
+        print("  EMPTY DELTA — the org already matches the sheet. Nothing to build,")
+        print("  nothing to deploy. (Re-running is a no-op by design.)")
+        print("-" * 72)
+        return plan, tab_of
+
+    # 6) staged generation — never touches the tracked force-app tree.
+    print(f"\n[6/8] generate metadata XML (staged → {STAGING_ROOT})")
+    shutil.rmtree(STAGING, ignore_errors=True)
+    init_staging(snapshot["target"].get("apiVersion") or DEFAULT_API_VERSION)
+    run(["python3", str(SCRIPTS / "generate_xml.py"),
+         "--in", str(temp_path), "--source-root", str(STAGING_ROOT),
+         "--plan", str(PLAN)], os.environ.copy(), capture=True)
+
+    if plan["lang"] == "off":
+        print("\n[6b] object translations: disabled (--lang off)")
+    elif plan["translationState"] != "ok":
+        print(f"\n[6b] object translations: {plan['translationState']} — "
+              f"{plan['translationNote'][:160]}")
+    elif not plan["translationPackage"]:
+        print("\n[6b] object translations: nothing new to translate")
     else:
-        print(f"\n[4b] generate object translations "
-              f"({args.lang} CustomObjectTranslation)")
-        # Only the language we regenerate is rebuilt; translations for other
-        # languages already staged in the tree are left alone.
-        for o in objs:
-            shutil.rmtree(TRANSLATIONS_ROOT / f"{o}-{args.lang}", ignore_errors=True)
-        run(["python3", str(SCRIPTS / "translation_drift.py"),
-             "--rows", str(temp_path),
-             "--org", args.org, "--lang", args.lang, "--new-only",
-             "--on-unavailable", args.on_translation_unavailable,
-             "--out", str(TRANSLATION_DELTA)],
-            sf_env(args), capture=True)
+        print(f"\n[6b] object translations ({plan['lang']}, "
+              f"{len(plan['translationPackage'])} new) — patched onto the org's own "
+              f"translation tree")
         run(["python3", str(SCRIPTS / "generate_object_translation.py"),
-             "--rows", str(temp_path), "--org", args.org, "--lang", args.lang,
+             "--rows", str(temp_path), "--snapshot", str(SNAPSHOT),
+             "--lang", plan["lang"], "--delta", str(PLAN),
              "--on-unavailable", args.on_translation_unavailable,
-             "--delta", str(TRANSLATION_DELTA)],
-            sf_env(args), capture=True)
+             "--out-root", str(STAGING_TRANSLATIONS)],
+            os.environ.copy(), capture=True)
 
-    # 5) build ONE manifest for the whole batch
-    print("\n[5/6] build manifest (single package for the batch)")
+    # 7) ONE manifest built from the PLAN's members (not a directory scan, which
+    #    can pick up stale metadata left behind by an earlier run).
+    print("\n[7/8] build manifest from the plan")
     run(["python3", str(SCRIPTS / "build_manifest.py"),
-         "--source-root", str(SOURCE_ROOT), "--project-root", str(ROOT),
-         "--out", str(PACKAGE), "--only", ",".join(objs)],
+         "--plan", str(PLAN), "--project-root", str(STAGING),
+         "--max-components", str(args.max_components),
+         "--out", str(PACKAGE)],
         os.environ.copy(), capture=True)
 
-    # 6) existence pre-check + check-only dry-run
-    print("\n[6/6] object-existence pre-check + check-only dry-run")
-    inlist = "','".join(objs)
-    present = {r["QualifiedApiName"] for r in
-               soql(f"SELECT QualifiedApiName FROM EntityDefinition WHERE QualifiedApiName IN ('{inlist}')", args)}
-    for o in objs:
-        print(f"      {'EXISTS ' if o in present else 'NEW    '} {o}"
-              + ("" if o in present else "  (object + fields will be created)"))
-
+    # 8) check-only dry-run of exactly that package, from the staged project
+    print("\n[8/8] check-only dry-run (writes nothing)")
     run(["python3", str(SCRIPTS / "deploy.py"),
          "--package", str(PACKAGE), "--target-org", args.org,
          "--test-level", args.test_level,
-         "--validation-report", str(VALIDATION_REPORT)],
+         "--validation-report", str(VALIDATION_REPORT),
+         "--project-dir", str(STAGING), "--log", str(LAST_DEPLOY_LOG)],
         sf_env(args), capture=True)
 
-    # 6b) attribute-level drift for EXISTING objects — the name-based delta only
-    #     checks whether a field EXISTS; this compares the sheet's DEFINITION
-    #     (type / formula / referenceTo / picklist) against the org's ACTUAL
-    #     metadata for fields present in both, surfacing changed-but-existing
-    #     fields the delta would otherwise silently skip. Report-only (never
-    #     blocks the build): type changes usually need a delete+recreate decision.
-    print("\n[6b] attribute-drift check (existing objects: sheet definition vs org)")
-    total_drift = 0
-    for o in objs:
-        if o not in present:
-            print(f"      NEW    {o}: skipped (nothing to compare)")
-            continue
-        drift_out = str(ROOT / f".build/attr_drift_{o}.json")
-        subprocess.run(["python3", str(SCRIPTS / "attr_drift.py"), "--object", o,
-                        "--rows", str(temp_path), "--org", args.org, "--out", drift_out],
-                       env=google_env(args), text=True)
-        try:
-            total_drift += len(json.loads(Path(drift_out).read_text()))
-        except Exception:
-            pass
-    if total_drift:
-        print(f"\n      ⚠️  {total_drift} field(s) differ in DEFINITION between sheet and org "
-              f"(see .build/attr_drift_*.json).\n"
-              f"          These are NOT redeployed by the name-based delta. Review whether they\n"
-              f"          need an update (some type changes require delete+recreate = data loss).")
-
     print("\n" + "-" * 72)
-    print("  BUILD OK — validated, packaged, dry-run PASSED (nothing written to org).")
-    print("  To deploy for real (GATED): after the user types SHOOT, run again with")
-    print("     --phase deploy   (same --tabs/--org).")
+    print("  BUILD OK — planned, staged, packaged, dry-run PASSED (no org writes).")
+    print(f"  plan: {PLAN}")
+    print("  To deploy for real, re-run with --phase deploy (same --tabs/--org).")
     print("-" * 72)
-    return objs, tab_of
+    return plan, tab_of
 
 
-def deploy_phase(args, temp_path: Path, objs: list[str], tab_of: dict[str, str]) -> int:
+def persist_sync_state(plan: dict) -> None:
+    """Record the deployed translation hashes — only AFTER live verification.
+
+    Writing them earlier would make a failed deploy look "already deployed" on
+    the next run and silently drop the translation from the delta. The state is
+    keyed by the target org's immutable Id, so it can never be read back
+    against a different sandbox.
+    """
+    packaged = [t for t in plan.get("translations") or [] if t.get("package")]
+    org_id = (plan.get("target") or {}).get("orgId", "")
+    if not packaged or not org_id:
+        return
+    save_sync_state(packaged, (plan.get("target") or {}).get("alias", ""),
+                    SYNC_STATE, org_id=org_id)
+    print(f"      recorded {len(packaged)} verified translation hash(es) for org "
+          f"{org_id} → {SYNC_STATE}")
+
+
+def deploy_phase(args, temp_path: Path, plan: dict, tab_of: dict[str, str]) -> int:
+    objs = [o["object"] for o in plan["objects"]]
     print("=" * 72)
     print(f"  DEPLOY PHASE (REAL — writes to org)   org={args.org}")
     print("=" * 72)
 
-    # REAL deploy of the single batch package
-    print("\n[1/3] real deploy (sf project deploy start)")
+    if plan["summary"]["empty"]:
+        print("\n  EMPTY DELTA — nothing to deploy. The org already matches the "
+              "sheet, so no package was built and no org write is attempted.")
+        return 0
+
+    # REAL deploy of the single planned package, from the staged project
+    print("\n[1/4] real deploy (sf project deploy start)")
     run(["python3", str(SCRIPTS / "deploy.py"), "--start",
          "--package", str(PACKAGE), "--target-org", args.org,
          "--test-level", args.test_level,
-         "--validation-report", str(VALIDATION_REPORT)],
+         "--validation-report", str(VALIDATION_REPORT),
+         "--project-dir", str(STAGING), "--log", str(LAST_DEPLOY_LOG)],
         sf_env(args), capture=True)
     # sanity: the log must be a real start, not a stale dry-run
     first = LAST_DEPLOY_LOG.read_text(encoding="utf-8").splitlines()[0] if LAST_DEPLOY_LOG.exists() else ""
@@ -309,20 +395,24 @@ def deploy_phase(args, temp_path: Path, objs: list[str], tab_of: dict[str, str])
         raise SystemExit(f"❌ deploy log is not a real 'deploy start' run:\n  {first}")
 
     # MANDATORY live verification (Tooling API, FLS-independent)
-    print("\n[2/3] live verification (verify_deploy.py, Tooling API)")
+    print("\n[2/4] live verification (verify_deploy.py, Tooling API)")
     cp = subprocess.run(
         ["python3", str(SCRIPTS / "verify_deploy.py"), "--target-org", args.org,
-         "--objects", ",".join(objs)],
+         "--objects", ",".join(objs), "--plan", str(PLAN)],
         env=sf_env(args), text=True)
     if cp.returncode != 0:
         raise SystemExit("⛔ VERIFICATION FAILED — the deploy did NOT fully land. "
                          "Do not report success; investigate before retrying.")
 
+    # translation hashes are recorded only now that the deploy is verified
+    print("\n[3/4] persist verified translation state")
+    persist_sync_state(plan)
+
     # report refresh per object (mandatory) — non-fatal if it errors
-    print("\n[3/3] refresh deployment report tabs")
+    print("\n[4/4] refresh deployment report tabs")
     for o in objs:
         tab = tab_of.get(o, "")
-        fields_dir = OBJECTS_ROOT / o / "fields"
+        fields_dir = STAGING_ROOT / "objects" / o / "fields"
         cmd = ["python3", str(SCRIPTS / "build_object_report.py"),
                "--object-api", o, "--sheet-tab", tab,
                "--sheet-id", args.sheet_id, "--target-org", args.org,
@@ -355,6 +445,15 @@ def main() -> int:
                     help="Translation Workbench language for the object "
                          "translations generated in step 4b (default en_US; "
                          "pass 'off' to skip translations entirely)")
+    ap.add_argument("--include-drift", default="",
+                    help="comma-separated Obj__c.Field__c whose ATTRIBUTE DRIFT "
+                         "you have reviewed and want redeployed. Drift is never "
+                         "packaged automatically: some type changes require "
+                         "delete+recreate and destroy the field's data.")
+    ap.add_argument("--max-components", type=int, default=9000,
+                    help="component cap per package; larger plans split "
+                         "deterministically, keeping each object with its own "
+                         "fields and translations")
     ap.add_argument("--on-translation-unavailable", choices=["error", "skip"],
                     default="error",
                     help="org without Translation Workbench / --lang active: "
@@ -378,13 +477,14 @@ def main() -> int:
 
     temp_path = Path(args.out)
 
-    # Build always runs first (idempotent) so deploy has a fresh, validated package.
-    objs, tab_of = build_phase(args, temp_path)
+    # Build always runs first (idempotent) so deploy has a fresh, validated
+    # package — and the PLAN it produces is what the deploy phase consumes.
+    plan, tab_of = build_phase(args, temp_path)
 
     if args.phase == "build":
         return 0
 
-    return deploy_phase(args, temp_path, objs, tab_of)
+    return deploy_phase(args, temp_path, plan, tab_of)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,19 @@ import xml.etree.ElementTree as ET
 NS = "http://soap.sforce.com/2006/04/metadata"
 ET.register_namespace("", NS)
 
+# Output root. Generation is STAGED by default (the orchestrator points this at
+# .build/staging/force-app) so a build never mutates the tracked force-app tree.
+_SOURCE_ROOT = Path("force-app/main/default")
+
+
+def set_source_root(root: str | Path) -> None:
+    global _SOURCE_ROOT
+    _SOURCE_ROOT = Path(root)
+
+
+def objects_root() -> Path:
+    return _SOURCE_ROOT / "objects"
+
 
 def qname(tag: str) -> str:
     return f"{{{NS}}}{tag}"
@@ -75,7 +88,7 @@ def write_object_meta(
     carries the Name field's label (col C), type (col E), and
     displayFormat (col H, only when type is AutoNumber).
     """
-    obj_dir = Path("force-app/main/default/objects") / obj_api
+    obj_dir = objects_root() / obj_api
     obj_dir.mkdir(parents=True, exist_ok=True)
     filepath = obj_dir / f"{obj_api}.object-meta.xml"
 
@@ -123,7 +136,7 @@ def write_object_meta(
 
 def ensure_object_meta(obj_api: str, obj_label: str) -> None:
     """Fallback stub — only writes if the file doesn't already exist."""
-    filepath = Path("force-app/main/default/objects") / obj_api / f"{obj_api}.object-meta.xml"
+    filepath = objects_root() / obj_api / f"{obj_api}.object-meta.xml"
     if not filepath.exists():
         write_object_meta(obj_api, obj_label)
 
@@ -682,8 +695,34 @@ def build_field_xml(row: dict) -> ET.Element | None:
 # Main processing loop
 # ---------------------------------------------------------------------------
 
+def plan_filter(rows: list[dict], plan: dict) -> list[dict]:
+    """Keep only what the deployment PLAN actually deploys.
+
+    Object-meta rows are kept for every target object (the object directory has
+    to exist for its fields), but the manifest only carries the CustomObject
+    member for objects that are genuinely new, so an existing object's
+    object-meta file is generated and simply not deployed.
+    """
+    planned = {o: set(f) for o, f in (plan.get("newFields") or {}).items()}
+    targets = {o["object"] for o in plan.get("objects") or []}
+    kept: list[dict] = []
+    for r in rows:
+        obj = str(r.get("Object API Name") or "").strip()
+        if obj and obj not in targets:
+            continue
+        if r.get("_type") == "object_meta":
+            kept.append(r)
+            continue
+        api = str(r.get("Field API Name") or "").strip()
+        if api and api in planned.get(obj, set()):
+            kept.append(r)
+        elif api == "Name":
+            kept.append(r)  # feeds the object's <nameField>, never a CustomField
+    return kept
+
+
 def process_fields(rows: list[dict]) -> None:
-    objects_dir = Path("force-app/main/default/objects")
+    objects_dir = objects_root()
     processed_objects: set[str] = set()
 
     # Objects that own at least one MasterDetail field must be ControlledByParent.
@@ -780,23 +819,44 @@ def process_fields(rows: list[dict]) -> None:
     # (b) it was a guess rather than a sourced value from the sheet.
 
 
-def main() -> None:
-    input_path = Path("temp_updates.json")
+def main() -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Generate object/field metadata XML")
+    ap.add_argument("--in", dest="input", default="temp_updates.json",
+                    help="fetch_sheet.py rows JSON (must match the orchestrator's "
+                         "--out; never assumed)")
+    ap.add_argument("--source-root", default=str(_SOURCE_ROOT),
+                    help="output root, e.g. .build/staging/force-app/main/default")
+    ap.add_argument("--plan", default="",
+                    help="deploy_plan.json — generate ONLY the planned fields")
+    args = ap.parse_args()
+
+    input_path = Path(args.input)
     if not input_path.exists():
-        print("No temp_updates.json found — skipping field XML generation.")
-        return
+        print(f"❌ rows file '{input_path}' not found — run fetch_sheet.py first.")
+        return 1
 
-    with input_path.open("r", encoding="utf-8") as f:
-        rows = json.load(f)
-
+    rows = json.loads(input_path.read_text(encoding="utf-8"))
     if not rows:
-        print("No rows in temp_updates.json — nothing to generate.")
-        return
+        print(f"No rows in {input_path} — nothing to generate.")
+        return 0
 
-    print(f"Processing {len(rows)} row(s) for custom field XML generation...")
+    set_source_root(args.source_root)
+
+    if args.plan:
+        plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
+        before = len(rows)
+        rows = plan_filter(rows, plan)
+        print(f"plan {args.plan}: generating {len(rows)} of {before} row(s) "
+              f"({plan.get('summary', {}).get('newFields', 0)} new field(s))")
+
+    print(f"Processing {len(rows)} row(s) → {objects_root()}")
     process_fields(rows)
     print("Custom field XML generation complete.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    sys.exit(main())

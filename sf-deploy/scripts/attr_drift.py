@@ -10,8 +10,8 @@ FORMULA, referenceTo, or PICKLIST values. This tool closes that blind spot by
 comparing the actual definitions for fields present in BOTH sheet and org.
 
 It reads the org's live metadata via the Metadata API `readMetadata`
-(CustomObject) using a session minted by get_token.py (sandbox-safe), so it does
-NOT depend on the sf CLI's deploy path.
+(CustomObject) with a session from the supported CLI (`sf org display`), so it
+works on any machine where the CLI is authorized for --org.
 
 Usage (standalone, live fetch):
   python scripts/attr_drift.py --object TI_Fnt_Deal__c --tab Deal \
@@ -29,6 +29,11 @@ from __future__ import annotations
 import argparse, json, os, re, subprocess, sys, urllib.request, urllib.error
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from translation_lib import (  # noqa: E402
+    MetadataApiError, OrgAuthError, org_auth, parse_soap,
+)
 
 # sheet "Data Type" -> (expected org base type, is_formula).
 # Keys are matched case-insensitively and after light normalization (see norm_dt).
@@ -79,14 +84,14 @@ def map_dt(dt: str):
 
 
 def load_token(org: str | None, token_file: str) -> dict:
+    """Session for `org` from the supported CLI (`sf org display`).
+
+    No keychain decryption and no assumption about where the CLI stores its
+    auth, so this behaves the same on a laptop, a build agent or a container.
+    """
     if org:
-        # refresh a valid session (sandbox-safe) via get_token.py
-        cp = subprocess.run(["python3", "scripts/get_token.py", "--alias", org, "--out", token_file],
-                            text=True, capture_output=True)
-        if cp.returncode != 0:
-            sys.exit(f"❌ get_token failed: {cp.stderr[:300] or cp.stdout[:300]}")
-    a = json.load(open(token_file))["result"]
-    return a
+        return org_auth(org)
+    return json.load(open(token_file))["result"]
 
 
 def read_org_object(api: str, tok: str, inst: str, ver: str) -> dict | None:
@@ -103,12 +108,12 @@ def read_org_object(api: str, tok: str, inst: str, ver: str) -> dict | None:
     try:
         xml = urllib.request.urlopen(req).read().decode()
     except urllib.error.HTTPError as e:
-        xml = e.read().decode()
-        sys.exit(f"❌ readMetadata HTTP {e.code}: {xml[:300]}")
-    xml = re.sub(r'\sxmlns(:\w+)?="[^"]*"', '', xml)   # drop ns declarations (incl default)
-    xml = re.sub(r'<(/?)\w+:', r'<\1', xml)            # drop element tag prefixes
-    xml = re.sub(r'\s\w+:(\w+=)', r' \1', xml)         # drop attribute prefixes
-    root = ET.fromstring(xml)
+        raise MetadataApiError(f"readMetadata HTTP {e.code}: {e.read().decode()[:300]}")
+    except urllib.error.URLError as e:
+        raise MetadataApiError(f"readMetadata: cannot reach {inst} ({e.reason})")
+    # namespace-AWARE parse: the parser resolves the prefixes and we drop the
+    # URIs on the parsed tree, so element text is never mangled.
+    root = parse_soap(xml)
     rec = root.find(".//records")
     if rec is None or rec.find("fullName") is None:
         return None  # object absent in org
@@ -166,8 +171,13 @@ def main() -> int:
         sheet.append(r)
 
     # 2) org metadata
-    a = load_token(args.org, args.token_file)
-    org = read_org_object(args.object, a["accessToken"], a["instanceUrl"].rstrip("/"), a["apiVersion"])
+    try:
+        a = load_token(args.org, args.token_file)
+        org = read_org_object(args.object, a["accessToken"],
+                              a["instanceUrl"].rstrip("/"), a["apiVersion"])
+    except (OrgAuthError, MetadataApiError) as e:
+        print(f"❌ {e}")
+        return 1
     if org is None:
         print(f"ℹ️  {args.object} not in org (NEW object) — no attribute drift to check.")
         json.dump([], open(args.out, "w"))

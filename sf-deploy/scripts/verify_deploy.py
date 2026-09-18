@@ -32,7 +32,27 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from translation_lib import soql_name  # noqa: E402
+
 FIELD_SUFFIX = ".field-meta.xml"
+
+
+def expected_from_plan(plan_path: Path, only: set[str] | None) -> dict[str, list[str]]:
+    """Expected objects + fields taken from the deployment PLAN.
+
+    Verification then checks exactly what was planned and deployed — it cannot
+    drift from the package the way a directory scan can (a leftover file would
+    be "verified" even though it was never in the manifest).
+    """
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    out: dict[str, list[str]] = {}
+    for obj in plan.get("objects") or []:
+        api = obj["object"]
+        if only and api not in only:
+            continue
+        out[api] = sorted(plan.get("newFields", {}).get(api, []))
+    return out
 
 
 def expected_from_source(source_root: Path, only: set[str] | None) -> dict[str, list[str]]:
@@ -70,7 +90,8 @@ def soql(query: str, org: str, tooling: bool = False) -> list[dict]:
 
 def org_has_object(obj: str, org: str) -> bool:
     recs = soql(
-        f"SELECT QualifiedApiName FROM EntityDefinition WHERE QualifiedApiName='{obj}'", org)
+        "SELECT QualifiedApiName FROM EntityDefinition "
+        f"WHERE QualifiedApiName='{soql_name(obj)}'", org)
     return len(recs) >= 1
 
 
@@ -92,7 +113,7 @@ def org_fields(obj: str, org: str) -> set[str]:
     # caller compare against the expected set derived from the generated package.
     recs = soql(
         "SELECT DeveloperName FROM CustomField "
-        f"WHERE EntityDefinition.QualifiedApiName='{obj}'",
+        f"WHERE EntityDefinition.QualifiedApiName='{soql_name(obj)}'",
         org, tooling=True)
     return {f"{r['DeveloperName']}__c" for r in recs}
 
@@ -101,6 +122,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Live post-deploy verification")
     ap.add_argument("--target-org", required=True)
     ap.add_argument("--source-root", default="force-app/main/default")
+    ap.add_argument("--plan", default="",
+                    help="deploy_plan.json — verify exactly the PLANNED members "
+                         "(preferred over scanning the generated tree)")
     ap.add_argument("--objects", default="", help="comma-separated <Obj>__c to verify")
     ap.add_argument("--all", action="store_true", help="verify every generated object")
     args = ap.parse_args()
@@ -110,10 +134,16 @@ def main() -> int:
         print("❌ pass --objects <Api,...> or --all")
         return 2
 
-    expected = expected_from_source(Path(args.source_root), only)
-    if not expected:
-        print("❌ no generated objects found under", args.source_root)
-        return 2
+    if args.plan:
+        expected = expected_from_plan(Path(args.plan), only)
+        if not expected:
+            print(f"❌ no objects in plan {args.plan}")
+            return 2
+    else:
+        expected = expected_from_source(Path(args.source_root), only)
+        if not expected:
+            print("❌ no generated objects found under", args.source_root)
+            return 2
 
     print("=" * 72)
     print(f"  LIVE POST-DEPLOY VERIFICATION  (org: {args.target_org})")

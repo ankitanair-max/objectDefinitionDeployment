@@ -27,6 +27,10 @@ import re
 import subprocess
 import sys
 from collections import defaultdict
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from translation_lib import API_NAME_RE, chunks, soql_in_list  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # Rule table  (data_type -> required / optional / forbidden / constraints)
@@ -418,11 +422,11 @@ def query_org_objects(target_org: str, ref_names: set[str]) -> set[str]:
     present: set[str] = set()
     names = sorted(want)
     # chunk to keep the IN() clause reasonable
-    for i in range(0, len(names), 190):
-        chunk = names[i:i + 190]
-        inlist = "','".join(chunk)
-        q = (f"SELECT QualifiedApiName FROM EntityDefinition "
-             f"WHERE QualifiedApiName IN ('{inlist}')")
+    # values come from the sheet, so they are validated as API names before they
+    # reach the query (an unexpected value is a sheet defect, not a literal)
+    for chunk in chunks([n for n in names if API_NAME_RE.match(n)], 190):
+        q = ("SELECT QualifiedApiName FROM EntityDefinition "
+             f"WHERE QualifiedApiName IN ({soql_in_list(chunk)})")
         try:
             cp = subprocess.run(
                 ["sf", "data", "query", "--target-org", target_org, "--json", "--query", q],
@@ -503,6 +507,9 @@ def main() -> int:
     print_log(rep, len(rows))
 
     if args.json_out:
+        # a fresh clone has no .build/ yet; without this the report write blows
+        # up and the caller sees an unparseable "-1 errors" gate
+        Path(args.json_out).parent.mkdir(parents=True, exist_ok=True)
         json.dump({"counts": dict(rep.counts), "items": rep.items},
                   open(args.json_out, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
         print(f"  report written: {args.json_out}")

@@ -40,14 +40,15 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import org_snapshot  # noqa: E402
 from translation_lib import (  # noqa: E402
     CFT_CHILD_ORDER, COT_CHILD_ORDER, DEFAULT_LANG, KIND_NAME_FIELD,
     KIND_OBJECT_FIELD, KIND_OBJECT_HELP, KIND_OBJECT_LABEL, KIND_OBJECT_PICKLIST,
     KIND_OBJECT_REL, REPO_ROOT, OrgAuthError, TranslationUnavailable,
-    entries_from_object_rows, field_element, has_translation_columns, norm,
-    org_auth, read_object_translations, render_metadata, set_object_label,
-    set_parent_text, set_picklist_translation, set_text, split_object_translation,
-    write_xml,
+    entries_from_object_rows, field_element, has_translation_columns,
+    index_entries, norm, org_auth, read_object_translations, render_metadata,
+    set_object_label, set_parent_text, set_picklist_translation, set_text,
+    split_object_translation, write_xml,
 )
 
 OUT_ROOT = REPO_ROOT / "force-app/main/default/objectTranslations"
@@ -61,7 +62,7 @@ def _group(entries: list[dict]) -> dict[str, list[dict]]:
     for e in entries:
         if e["kind"] in TRANSLATION_KINDS:
             g[e["component"]].append(e)
-    return g
+    return dict(sorted(g.items()))
 
 
 def _merge_org(sheet_entries: list[dict], org_by_id: dict[str, dict],
@@ -89,33 +90,46 @@ def patch_translation(org_rec, entries: list[dict]):
 
     Returns (parent_children, {fieldName: <fields> element}); every node the
     entries do not mention is the org's own, unmodified.
+
+    Entries are indexed once (object-level vs per-field) and each field is then
+    visited exactly once, so a 200-field object costs O(entries), not
+    O(entries × fields).
     """
     parent, fields = split_object_translation(org_rec)
+    indexed = index_entries([e for e in entries if e["kind"] in TRANSLATION_KINDS])
 
-    def field(name: str):
-        if name not in fields:
-            fields[name] = field_element(name)
-        return fields[name]
-
-    for e in entries:
-        value = norm(e.get("translation"))
+    def apply(entry, field_el):
+        value = norm(entry.get("translation"))
         if not value:
-            continue
-        kind = e["kind"]
-        if kind == KIND_OBJECT_LABEL:
-            parent = set_object_label(parent, value)
-        elif kind == KIND_NAME_FIELD:
-            parent = set_parent_text(parent, "nameFieldLabel", value)
-        elif kind == KIND_OBJECT_FIELD:
-            set_text(field(_field_of(e)), "label", value)
+            return
+        kind = entry["kind"]
+        if kind == KIND_OBJECT_FIELD:
+            set_text(field_el, "label", value)
         elif kind == KIND_OBJECT_HELP:
-            set_text(field(_field_of(e)), "help", value)
+            set_text(field_el, "help", value)
         elif kind == KIND_OBJECT_REL:
-            set_text(field(_field_of(e)), "relationshipLabel", value)
+            set_text(field_el, "relationshipLabel", value)
         elif kind == KIND_OBJECT_PICKLIST:
-            master = norm(e.get("master")) or norm(e["key"]).split("::", 1)[-1]
-            set_picklist_translation(field(_field_of(e)), master, value)
-    return parent, fields
+            master = norm(entry.get("master")) or norm(entry["key"]).split("::", 1)[-1]
+            set_picklist_translation(field_el, master, value)
+
+    for bucket in indexed.values():
+        for e in bucket["object"]:
+            value = norm(e.get("translation"))
+            if not value:
+                continue
+            if e["kind"] == KIND_OBJECT_LABEL:
+                parent = set_object_label(parent, value)
+            elif e["kind"] == KIND_NAME_FIELD:
+                parent = set_parent_text(parent, "nameFieldLabel", value)
+        for name, ents in bucket["fields"].items():
+            if not any(norm(e.get("translation")) for e in ents):
+                continue
+            if name not in fields:
+                fields[name] = field_element(name)
+            for e in ents:
+                apply(e, fields[name])
+    return parent, dict(sorted(fields.items()))
 
 
 def write_translation_dir(root: Path, obj: str, lang: str,
@@ -134,7 +148,11 @@ def main() -> int:
     ap.add_argument("--rows", default="", help="temp_updates.json from fetch_sheet.py")
     ap.add_argument("--catalog", default="", help="translation_catalog.json")
     ap.add_argument("--delta", default="", help="translation_drift.json — only objects with PKG rows")
-    ap.add_argument("--org", default="")
+    ap.add_argument("--org", default="",
+                    help="only needed without --snapshot (a live per-object read)")
+    ap.add_argument("--snapshot", default="",
+                    help="org_snapshot.json — reuse the ONE bulk org read "
+                         "instead of retrieving each object again")
     ap.add_argument("--lang", default=DEFAULT_LANG)
     ap.add_argument("--on-unavailable", choices=["error", "skip"], default="error",
                     help="org without Translation Workbench / the language active")
@@ -161,6 +179,9 @@ def main() -> int:
     package_ids: set[str] | None = None
     if args.delta:
         delta = json.loads(Path(args.delta).read_text(encoding="utf-8"))
+        # accept either a translation_drift list or a deploy_plan.json
+        if isinstance(delta, dict):
+            delta = delta.get("translations") or []
         package_ids = {d["id"] for d in delta if d.get("package")}
 
     grouped = _group(entries)
@@ -172,8 +193,18 @@ def main() -> int:
         print("generate_object_translation: delta packages nothing — no file written.")
         return 0
 
+    snapshot = None
     auth = None
-    if args.org:
+    if args.snapshot:
+        snapshot = org_snapshot.load(args.snapshot)
+        if snapshot.get("translationState") not in ("ok", "off"):
+            msg = snapshot.get("translationNote") or snapshot["translationState"]
+            if args.on_unavailable == "error":
+                print(f"❌ translations unavailable in {snapshot['target'].get('alias')}: {msg}")
+                return 1
+            print(f"⏭  translations skipped — {msg}")
+            return 0
+    elif args.org:
         try:
             auth = org_auth(args.org)
         except OrgAuthError as e:
@@ -184,7 +215,10 @@ def main() -> int:
     written = 0
     for obj, ents in sorted(targets.items()):
         org_rec = None
-        if auth:
+        if snapshot is not None:
+            # reuse the bulk snapshot — no extra Metadata API call per object
+            org_rec = org_snapshot.translation_record(snapshot, obj)
+        elif auth:
             try:
                 recs = read_object_translations([obj], args.lang, auth)
             except TranslationUnavailable as e:
@@ -195,8 +229,8 @@ def main() -> int:
                 return 1
             org_rec = recs[0] if recs else None
         elif package_ids is None:
-            print(f"  ⚠️  {obj}-{args.lang}: no --org, writing sheet-only translation "
-                  f"(existing org translations are NOT merged).")
+            print(f"  ⚠️  {obj}-{args.lang}: no --org/--snapshot, writing sheet-only "
+                  f"translation (existing org translations are NOT merged).")
 
         patch_ents = [e for e in ents
                       if package_ids is None or e["id"] in package_ids]

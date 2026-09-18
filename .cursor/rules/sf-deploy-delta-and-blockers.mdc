@@ -5,6 +5,45 @@ alwaysApply: true
 
 # Deploy: Blocker-Scan → Existence → Delta-Only → Post-Deploy Validation (MANDATORY)
 
+## THE CANONICAL COMMAND + THE DEPLOYMENT PLAN (read first)
+
+There is exactly ONE deployment entry point. It performs the whole chain,
+including object translations:
+
+```
+python scripts/prep_deploy.py --org "<TARGET_ORG>" --tabs "<OBJECT_TABS>" --phase deploy
+```
+
+```
+live sheet fetch → static validation → ONE org snapshot (.build/org_snapshot.json)
+ → attribute drift → deployment plan (.build/deploy_plan.json)
+ → STAGED generation (.build/staging/force-app) → manifest FROM THE PLAN
+ → check-only deploy → real deploy → live verification → verified state + report
+```
+
+Non-negotiables that follow from this:
+
+- **The plan is the single source of scope.** `.build/deploy_plan.json` carries
+ the immutable target org Id + alias, the sheet id + tabs, per-object existence,
+ new object/field members, skipped (already-present) fields, attribute drift,
+ the translation delta, the delete members and the EXACT manifest members.
+ Generation, the manifest, the dry-run, the real deploy and the verification all
+ CONSUME that plan — none of them recomputes scope on its own.
+- **The manifest is built from the plan, never from a directory scan**
+ (`build_manifest.py --plan`), so a stale artifact from an earlier run can never
+ ride along.
+- **Generation is staged** into `.build/staging/force-app`; the tracked
+ `force-app` tree is never mutated by a build, and only the selected language
+ directory is (re)generated — never every `<Obj>__c-*` locale.
+- **One org read.** `org_snapshot.py` takes existence, existing field names and
+ the translation snapshot in one bulk pass; nothing downstream re-queries.
+- **Empty delta is a no-op.** A second run with no sheet changes produces an
+ empty plan: no package, no org write.
+- **Translation sync state is written only after `verify_deploy.py` passes**, and
+ is keyed by the org Id.
+- `deploy.py` is a low-level `sf` wrapper (no plan, no translations) and `run.py`
+ delegates to `prep_deploy.py`; neither is a deployment entry point on its own.
+
 Whenever the user asks to deploy ANY object or its fields to a target org, you
 MUST run the ordered flow below, every time, for EACH object in the request
 (single-object AND multi-object commands alike). No step is optional, no step is
@@ -140,14 +179,18 @@ and deploy ONLY the new (and, if explicitly requested, changed) fields.
    ```
    python scripts/attr_drift.py --object <Obj>__c --rows temp_updates.json --org <ORG>
    ```
-   It reads the org's ACTUAL metadata via the Metadata API `readMetadata`
-   (FLS-independent) and compares, per field, **type, formula, referenceTo,
-   picklist values, length, visibleLines, precision, scale, required, unique, and
-   externalId** (and flags any unmapped Data Type). It writes
-   `.build/attr_drift_<Obj>.json`. `prep_deploy.py` runs this automatically in its
-   build phase (step 6b). SURFACE any drift to the user. Redeploying drift is a user decision, not automatic — many type changes
-   (Lookup↔Formula, Checkbox↔Picklist, Text→Lookup) require delete+recreate and
-   DESTROY the field's data, so never silently redeploy a drifted field.
+ It reads the org's ACTUAL metadata via the Metadata API `readMetadata`
+ (FLS-independent) and compares, per field, **type, formula, referenceTo,
+ picklist values, length, visibleLines, precision, scale, required, unique, and
+ externalId** (and flags any unmapped Data Type). It writes
+ `.build/attr_drift_<Obj>.json`. `prep_deploy.py` runs this automatically
+ BEFORE generation and the plan, and a NON-ZERO exit (or a missing report) HARD
+ STOPS the build — a failed drift check is never read as a clean one.
+ SURFACE any drift to the user. Redeploying drift is a user decision, not
+ automatic — many type changes (Lookup↔Formula, Checkbox↔Picklist, Text→Lookup)
+ require delete+recreate and DESTROY the field's data, so never silently
+ redeploy a drifted field. The opt-in is explicit and per field:
+ `prep_deploy.py --include-drift <Obj>__c.<Field>__c[,...]`.
 3c. **TRANSLATION DELTA (MANDATORY when the tab has `Field Label (EN)`).** Name
    delta + attr_drift do not cover English. Locate EN by **header**
    `Field Label (EN)` (same as WIP / IsDelete / `fullName`).
