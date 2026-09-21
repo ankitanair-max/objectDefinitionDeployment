@@ -23,8 +23,6 @@ from mcp_deepl import DeepLProvider, DeepLTranslateError, DeepLUnavailable
 from sheet_client import SheetClient
 from translation_lib import (
     FIELD_EN_HEADER,
-    GENERATED_HEADER,
-    HASH_HEADER,
     KIND_NAME_FIELD,
     KIND_OBJECT_FIELD,
     KIND_OBJECT_LABEL,
@@ -32,15 +30,20 @@ from translation_lib import (
     OBJECT_GENERATED_LABEL,
     OBJECT_HASH_LABEL,
     OBJECT_ORIGIN_LABEL,
+    OBJECT_PROVENANCE_LABEL,
     ORIGIN_DEEPL,
     ORIGIN_GOOGLE,
     ORIGIN_HEADER,
     ORIGIN_MANUAL,
+    GENERATED_HEADER,
+    HASH_HEADER,
+    PROVENANCE_HEADER,
     SF_LANG,
     a1 as sheets_a1,
     cell_at,
     classify_need,
     content_hash,
+    format_provenance,
     google_formula,
     glossary_lookup,
     build_glossary,
@@ -49,6 +52,7 @@ from translation_lib import (
     is_delete,
     now_iso,
     norm,
+    parse_provenance,
     plan_missing_headers,
     truthy,
 )
@@ -138,6 +142,7 @@ def collect_tab(
     if ja_col is None:
         ja_col = header_index(header, "label", "field label")
     en_col = header_index(header, FIELD_EN_HEADER, "field label (en)")
+    prov_col = header_index(header, PROVENANCE_HEADER)
     origin_col = header_index(header, ORIGIN_HEADER)
     hash_col = header_index(header, HASH_HEADER)
     gen_col = header_index(header, GENERATED_HEADER)
@@ -148,19 +153,23 @@ def collect_tab(
     # If EN/provenance will be created, use the planned indices for writes.
     if en_col is None:
         en_col = missing.get(FIELD_EN_HEADER)
-    if origin_col is None:
-        origin_col = missing.get(ORIGIN_HEADER)
-    if hash_col is None:
-        hash_col = missing.get(HASH_HEADER)
-    if gen_col is None:
-        gen_col = missing.get(GENERATED_HEADER)
+    if prov_col is None:
+        prov_col = missing.get(PROVENANCE_HEADER)
 
     obj_en, obj_en_r, obj_en_c = _find_meta_value(
         grid, hidx, OBJECT_EN_LABEL, "表示ラベル (EN)", "表示ラベル(EN)")
+    obj_pv, obj_pv_r, obj_pv_c = _find_meta_value(
+        grid, hidx, OBJECT_PROVENANCE_LABEL, "翻訳出典")
     obj_or, obj_or_r, obj_or_c = _find_meta_value(grid, hidx, OBJECT_ORIGIN_LABEL)
     obj_hs, obj_hs_r, obj_hs_c = _find_meta_value(grid, hidx, OBJECT_HASH_LABEL)
     obj_gn, obj_gn_r, obj_gn_c = _find_meta_value(grid, hidx, OBJECT_GENERATED_LABEL)
     obj_ja, obj_ja_r, obj_ja_c = _find_meta_value(grid, hidx, "表示ラベル")
+    pv_o, pv_h, pv_t = parse_provenance(obj_pv)
+    obj_or = pv_o or obj_or
+    obj_hs = pv_h or obj_hs
+    obj_gn = pv_t or obj_gn
+    if obj_pv_r < 0 and obj_or_r >= 0:
+        obj_pv, obj_pv_r, obj_pv_c = obj_or, obj_or_r, obj_or_c
 
     loc = {
         "tab": tab,
@@ -168,6 +177,7 @@ def collect_tab(
         "header_cells": header,
         "ja_col": ja_col,
         "en_col": en_col,
+        "prov_col": prov_col,
         "origin_col": origin_col,
         "hash_col": hash_col,
         "gen_col": gen_col,
@@ -176,6 +186,8 @@ def collect_tab(
         "helper": helper,
         "missing_headers": missing,
         "object_en": {"value": obj_en, "row0": obj_en_r, "col0": obj_en_c},
+        "object_prov": {"value": format_provenance(obj_or, obj_hs, obj_gn) if (obj_or or obj_hs or obj_gn) else obj_pv,
+                        "row0": obj_pv_r, "col0": obj_pv_c},
         "object_origin": {"value": obj_or, "row0": obj_or_r, "col0": obj_or_c},
         "object_hash": {"value": obj_hs, "row0": obj_hs_r, "col0": obj_hs_c},
         "object_generated": {"value": obj_gn, "row0": obj_gn_r, "col0": obj_gn_c},
@@ -196,19 +208,25 @@ def collect_tab(
         ftype = _cell(grid, i, type_col)
         if not (api or (ja and ftype)):
             continue
+        packed = _cell(grid, i, prov_col)
+        po, ph, pt = parse_provenance(packed)
+        origin = po or _cell(grid, i, origin_col)
+        source_hash = ph or _cell(grid, i, hash_col)
+        generated_at = pt or _cell(grid, i, gen_col)
         rec = {
             "sheet_row": i + 1,
             "api": api,
             "ja": ja,
             "en": _cell(grid, i, en_col),
-            "origin": _cell(grid, i, origin_col),
-            "source_hash": _cell(grid, i, hash_col),
-            "generated_at": _cell(grid, i, gen_col),
+            "origin": origin,
+            "source_hash": source_hash,
+            "generated_at": generated_at,
             "type": ftype,
             "wip": truthy(_cell(grid, i, wip_c)),
             "isdelete": is_delete(_cell(grid, i, del_c)),
             "ja_a1": sheets_a1(ja_col, i + 1) if ja_col is not None else "",
             "en_a1": sheets_a1(en_col, i + 1) if en_col is not None else "",
+            "prov_a1": sheets_a1(prov_col, i + 1) if prov_col is not None else "",
             "origin_a1": sheets_a1(origin_col, i + 1) if origin_col is not None else "",
             "hash_a1": sheets_a1(hash_col, i + 1) if hash_col is not None else "",
             "gen_a1": sheets_a1(gen_col, i + 1) if gen_col is not None else "",
@@ -296,12 +314,11 @@ def build_jobs(locs: list[dict], object_rows: list[dict]) -> list[dict]:
             if loc["object_ja"]["row0"] >= 0 and loc["object_ja"]["col0"] >= 0 else "",
             "en_a1": sheets_a1(loc["object_en"]["col0"], loc["object_en"]["row0"] + 1)
             if loc["object_en"]["row0"] >= 0 and loc["object_en"]["col0"] >= 0 else "",
-            "origin_a1": sheets_a1(loc["object_origin"]["col0"], loc["object_origin"]["row0"] + 1)
-            if loc["object_origin"]["row0"] >= 0 else "",
-            "hash_a1": sheets_a1(loc["object_hash"]["col0"], loc["object_hash"]["row0"] + 1)
-            if loc["object_hash"]["row0"] >= 0 else "",
-            "gen_a1": sheets_a1(loc["object_generated"]["col0"], loc["object_generated"]["row0"] + 1)
-            if loc["object_generated"]["row0"] >= 0 else "",
+            "prov_a1": sheets_a1(loc["object_prov"]["col0"], loc["object_prov"]["row0"] + 1)
+            if loc["object_prov"]["row0"] >= 0 and loc["object_prov"]["col0"] >= 0 else "",
+            "origin_a1": "",
+            "hash_a1": "",
+            "gen_a1": "",
             "wip": False,
             "isdelete": False,
         })
@@ -314,14 +331,14 @@ def build_jobs(locs: list[dict], object_rows: list[dict]) -> list[dict]:
                 "field_api": "Name",
                 **{k: name[k] for k in (
                     "ja", "en", "origin", "source_hash", "generated_at",
-                    "ja_a1", "en_a1", "origin_a1", "hash_a1", "gen_a1",
+                    "ja_a1", "en_a1", "prov_a1", "origin_a1", "hash_a1", "gen_a1",
                     "wip", "isdelete",
                 )},
             })
         for fr in loc["field_rows"]:
             api = fr["api"]
-            if not api.endswith("__c"):
-                continue  # standard fields other than Name are out of scope
+            if not api:
+                continue
             if fr["wip"] or fr["isdelete"]:
                 jobs.append({
                     "kind": KIND_OBJECT_FIELD,
@@ -457,20 +474,18 @@ def jobs_to_writes(jobs: list[dict], locs_by_tab: dict[str, dict]) -> list[CellW
                     "", OBJECT_EN_LABEL, "RAW", j["kind"], field, obj, ja, note="header",
                 ))
             add(j.get("en_a1"), j.get("old_en"), en_new, "en")
-            add(j.get("origin_a1") or _meta_a1(loc, "object_origin", OBJECT_ORIGIN_LABEL),
-                j.get("old_origin"), j.get("origin"), "origin")
-            add(j.get("hash_a1") or _meta_a1(loc, "object_hash", OBJECT_HASH_LABEL),
-                j.get("old_hash"), j.get("source_hash"), "hash")
-            add(j.get("gen_a1") or _meta_a1(loc, "object_generated", OBJECT_GENERATED_LABEL),
-                j.get("old_generated"), j.get("generated_at"), "generated")
+            old_p = format_provenance(j.get("old_origin"), j.get("old_hash"), j.get("old_generated"))
+            new_p = format_provenance(j.get("origin"), j.get("source_hash"), j.get("generated_at"))
+            add(j.get("prov_a1") or _meta_a1(loc, "object_prov", OBJECT_PROVENANCE_LABEL),
+                old_p, new_p, "provenance")
             continue
 
         # Name + custom fields share the field-row columns.
         if action != "provenance_backfill" or (j.get("old_en") != en_new):
             add(j.get("en_a1"), j.get("old_en"), en_new, "en")
-        add(j.get("origin_a1"), j.get("old_origin"), j.get("origin"), "origin")
-        add(j.get("hash_a1"), j.get("old_hash"), j.get("source_hash"), "hash")
-        add(j.get("gen_a1"), j.get("old_generated"), j.get("generated_at"), "generated")
+        old_p = format_provenance(j.get("old_origin"), j.get("old_hash"), j.get("old_generated"))
+        new_p = format_provenance(j.get("origin"), j.get("source_hash"), j.get("generated_at"))
+        add(j.get("prov_a1") or j.get("origin_a1"), old_p, new_p, "provenance")
     # de-dupe identical ranges keeping last
     seen = {}
     for w in writes:
@@ -498,9 +513,7 @@ def header_writes(locs: list[dict]) -> list[CellWrite]:
             if hrow > 1:
                 jp = {
                     FIELD_EN_HEADER: "項目ラベル名 (EN)",
-                    ORIGIN_HEADER: "翻訳元",
-                    HASH_HEADER: "翻訳ソースハッシュ",
-                    GENERATED_HEADER: "翻訳生成日時",
+                    PROVENANCE_HEADER: "翻訳出典",
                 }.get(hdr, hdr)
                 out.append(_write(
                     tab, sheets_a1(col, hrow - 1), "", jp, "RAW",
@@ -602,6 +615,8 @@ def merge_into_rows(rows: list[dict], jobs: list[dict]) -> list[dict]:
             j = by_obj_field.get((obj, obj, KIND_OBJECT_LABEL))
             if j and j.get("en_new"):
                 r["Object Label (EN)"] = j["en_new"]
+                r["Object Translation Provenance"] = format_provenance(
+                    j.get("origin", ""), j.get("source_hash", ""), j.get("generated_at", ""))
                 r["Object Translation Origin"] = j.get("origin", "")
                 r["Object Translation Source Hash"] = j.get("source_hash", "")
             n = by_obj_field.get((obj, "Name", KIND_NAME_FIELD))
@@ -612,6 +627,8 @@ def merge_into_rows(rows: list[dict], jobs: list[dict]) -> list[dict]:
         j = by_obj_field.get((obj, api, KIND_OBJECT_FIELD))
         if j and j.get("en_new"):
             r["Field Label (EN)"] = j["en_new"]
+            r["Translation Provenance"] = format_provenance(
+                j.get("origin", ""), j.get("source_hash", ""), j.get("generated_at", ""))
             r["Translation Origin"] = j.get("origin", "")
             r["Translation Source Hash"] = j.get("source_hash", "")
             r["Translation Generated At"] = j.get("generated_at", "")

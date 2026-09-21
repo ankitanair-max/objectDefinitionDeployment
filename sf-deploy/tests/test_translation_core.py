@@ -9,18 +9,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from translation_lib import (
     CHANGED,
     FIELD_EN_HEADER,
-    GENERATED_HEADER,
-    HASH_HEADER,
     KIND_OBJECT_FIELD,
     NEW,
-    ORIGIN_HEADER,
+    PROVENANCE_HEADER,
     UNCHANGED,
     build_glossary,
     classify_need,
     content_hash,
+    format_provenance,
     glossary_lookup,
     google_formula,
     invalid_english,
+    parse_provenance,
     plan_missing_headers,
     starts_with_for,
 )
@@ -95,11 +95,35 @@ def test_missing_headers_use_spare_gdc_not_insert():
               "FreeColumnGDC4", "FreeColumnGDC5", "FreeColumnGDC6"]
     plan = plan_missing_headers(header)
     assert FIELD_EN_HEADER in plan
-    assert ORIGIN_HEADER in plan
-    assert HASH_HEADER in plan
-    assert GENERATED_HEADER in plan
-    # assigned to spare GDC indices, not a mid-list insert
+    assert PROVENANCE_HEADER in plan
+    assert len(plan) == 2
     assert plan[FIELD_EN_HEADER] == header.index("FreeColumnGDC3")
+    # Provenance is the column immediately right of Field Label (EN)
+    assert plan[PROVENANCE_HEADER] == plan[FIELD_EN_HEADER] + 1
+
+
+def test_provenance_immediately_right_of_existing_en():
+    header = ["No.", "label", "fullName", "type",
+              "Field Label (EN)", "FreeColumnGDC4", "FreeColumnGDC5"]
+    plan = plan_missing_headers(header)
+    assert FIELD_EN_HEADER not in plan
+    assert plan[PROVENANCE_HEADER] == header.index("Field Label (EN)") + 1
+    assert header[plan[PROVENANCE_HEADER]] == "FreeColumnGDC4"
+
+
+def test_provenance_does_not_overwrite_fullname():
+    header = ["No.", "label", "Field Label (EN)", "fullName", "type", "FreeColumnGDC4"]
+    plan = plan_missing_headers(header)
+    assert plan[PROVENANCE_HEADER] == header.index("FreeColumnGDC4")
+    assert plan[PROVENANCE_HEADER] != header.index("fullName")
+
+
+def test_provenance_roundtrip_one_cell():
+    packed = format_provenance("manual", "abc123", "2026-09-21T10:00:00Z")
+    assert packed == "manual | abc123 | 2026-09-21T10:00:00Z"
+    assert parse_provenance(packed) == ("manual", "abc123", "2026-09-21T10:00:00Z")
+    assert parse_provenance("deepl") == ("deepl", "", "")
+    assert parse_provenance("") == ("", "", "")
 
 
 def test_starts_with():

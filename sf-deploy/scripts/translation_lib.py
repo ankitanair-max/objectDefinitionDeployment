@@ -3,8 +3,7 @@
 translation_lib.py — shared primitives for automatic JA→en_US label translation.
 
 In-scope labels (initial): custom object label, standard Name-field label,
-custom field label. Picklists / relationship labels / help text are parsed
-from the org only so they can be preserved, never generated.
+custom field labels, and provenance on standard fields (OwnerId, CreatedDate, …).
 
 This module has no CLI and performs no I/O besides pure functions + XML.
 """
@@ -76,13 +75,17 @@ STANDARD_FIELD_EN = {
 }
 
 FIELD_EN_HEADER = "Field Label (EN)"
+PROVENANCE_HEADER = "Translation Provenance"
+# Legacy 3-column headers — still READ if present, never created.
 ORIGIN_HEADER = "Translation Origin"
 HASH_HEADER = "Translation Source Hash"
 GENERATED_HEADER = "Translation Generated At"
 OBJECT_EN_LABEL = "Object Label (EN)"
+OBJECT_PROVENANCE_LABEL = "Object Translation Provenance"
 OBJECT_ORIGIN_LABEL = "Object Translation Origin"
 OBJECT_HASH_LABEL = "Object Translation Source Hash"
 OBJECT_GENERATED_LABEL = "Object Translation Generated At"
+PROVENANCE_SEP = " | "
 
 # Spare GDC columns (header-driven; AJ–BA = FreeColumnGDC3–20).
 SPARE_GDC_HEADERS = [f"FreeColumnGDC{i}" for i in range(3, 21)]
@@ -346,6 +349,54 @@ def glossary_lookup(glossary: dict, *, api: str = "", ja: str = "") -> tuple[str
 # --------------------------------------------------------------------------- #
 # Need classification (sheet-side, before provider)
 # --------------------------------------------------------------------------- #
+def format_provenance(origin: str = "", source_hash: str = "", generated_at: str = "") -> str:
+    """Pack origin + JA-hash + timestamp into one sheet cell."""
+    o, h, t = norm(origin), norm(source_hash), norm(generated_at)
+    if not (o or h or t):
+        return ""
+    return PROVENANCE_SEP.join((o, h, t))
+
+
+def parse_provenance(cell: str) -> tuple[str, str, str]:
+    """Unpack a combined provenance cell. Also accepts a bare origin token."""
+    text = str(cell or "").strip()
+    if not text:
+        return "", "", ""
+    low = text.lower()
+    if "origin=" in low or "hash=" in low:
+        kv: dict[str, str] = {}
+        for line in re.split(r"[\n;]+", text):
+            if "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            kv[norm(k).lower()] = norm(v)
+        return kv.get("origin", ""), kv.get("hash", ""), kv.get("at") or kv.get("generated") or kv.get("generated_at") or ""
+    parts = [p.strip() for p in re.split(r"\s*\|\s*", text)]
+    while len(parts) < 3:
+        parts.append("")
+    origin, source_hash, generated_at = parts[0], parts[1], parts[2]
+    if not source_hash and not generated_at and origin.lower() in VALID_ORIGINS:
+        return origin.lower(), "", ""
+    return origin, source_hash, generated_at
+
+
+def unpack_provenance(rec: dict, *, packed_key: str, origin_key: str,
+                      hash_key: str, gen_key: str) -> None:
+    """Fill origin/hash/generated keys from a packed cell, falling back to legacy columns."""
+    o, h, t = parse_provenance(rec.get(packed_key) or "")
+    if not o:
+        o = norm(rec.get(origin_key))
+    if not h:
+        h = norm(rec.get(hash_key))
+    if not t:
+        t = norm(rec.get(gen_key))
+    rec[origin_key] = o
+    rec[hash_key] = h
+    rec[gen_key] = t
+    if not norm(rec.get(packed_key)):
+        rec[packed_key] = format_provenance(o, h, t)
+
+
 def classify_need(ja: str, en: str, stored_hash: str, origin: str) -> str:
     """What to do for one in-scope label.
 
@@ -387,37 +438,58 @@ def spare_gdc_indices(header_row: list) -> list[int]:
     return out
 
 
-def plan_missing_headers(header_row: list) -> dict:
-    """Return {header: col_index} to create, using unused spare GDC columns.
+def _usable_provenance_slot(header_row: list, idx: int, *, taken: set[int]) -> bool:
+    """True if we can rename this column to Translation Provenance.
 
-    Never inserts a column in the middle of the field list (that would shift
-    fullName). Missing EN/provenance headers occupy FreeColumnGDC* cells.
+    Must sit immediately right of Field Label (EN) when that cell is a spare or
+    blank. Never overwrite fullName / type / label / status columns.
     """
-    needed = []
-    if header_index(header_row, FIELD_EN_HEADER, "field label (en)") is None:
-        needed.append(FIELD_EN_HEADER)
-    if header_index(header_row, ORIGIN_HEADER) is None:
-        needed.append(ORIGIN_HEADER)
-    if header_index(header_row, HASH_HEADER) is None:
-        needed.append(HASH_HEADER)
-    if header_index(header_row, GENERATED_HEADER) is None:
-        needed.append(GENERATED_HEADER)
-    if not needed:
-        return {}
-    spares = spare_gdc_indices(header_row)
-    # A spare currently holding a needed header is not free.
-    taken = set()
+    if idx < 0 or idx in taken:
+        return False
+    if idx >= len(header_row):
+        return True
+    h = norm(header_row[idx])
+    if not h:
+        return True
+    hl = h.lower()
+    if hl == PROVENANCE_HEADER.lower():
+        return True
+    return hl.startswith("freecolumngdc")
+
+
+def plan_missing_headers(header_row: list) -> dict:
+    """Return {header: col_index} to create.
+
+    Translation Provenance is always the column immediately to the right of
+    Field Label (EN). EN/provenance occupy spare FreeColumnGDC* (or empty)
+    cells — never a mid-list insert that would shift fullName.
+    """
     assign: dict[str, int] = {}
-    for hdr, col in zip(needed, spares):
-        assign[hdr] = col
-        taken.add(col)
-    if len(assign) < len(needed):
-        # Fall back to the first unused columns to the right of the header row.
-        width = len(header_row)
-        extra = iter(i for i in range(width, width + 20) if i not in taken)
-        for hdr in needed:
-            if hdr not in assign:
-                assign[hdr] = next(extra)
+    taken: set[int] = set()
+    spares = spare_gdc_indices(header_row)
+
+    en_col = header_index(header_row, FIELD_EN_HEADER, "field label (en)")
+    if en_col is None:
+        if spares:
+            en_col = spares[0]
+        else:
+            en_col = len(header_row)
+        assign[FIELD_EN_HEADER] = en_col
+        taken.add(en_col)
+
+    if header_index(header_row, PROVENANCE_HEADER) is None:
+        candidate = en_col + 1
+        if _usable_provenance_slot(header_row, candidate, taken=taken):
+            assign[PROVENANCE_HEADER] = candidate
+        else:
+            right = [s for s in spares if s > en_col and s not in taken]
+            if right:
+                assign[PROVENANCE_HEADER] = right[0]
+            else:
+                col = max(len(header_row), en_col + 1)
+                while col in taken:
+                    col += 1
+                assign[PROVENANCE_HEADER] = col
     return assign
 
 

@@ -41,6 +41,7 @@ warnings.filterwarnings("ignore")
 API_HEADER_TO_KEY = {
     "label": "Field Label",
     "field label (en)": "Field Label (EN)",
+    "translation provenance": "Translation Provenance",
     "translation origin": "Translation Origin",
     "translation source hash": "Translation Source Hash",
     "translation generated at": "Translation Generated At",
@@ -228,8 +229,12 @@ def build_col_map(header_row: list, jp_header_row: list | None = None) -> dict[i
         if ("ラベル" in jph and "(en)" in jph_l) or "項目ラベル名 (en)" in jph_l:
             col_map[idx] = "Field Label (EN)"
             continue
-        if h in ("field label (en)", "translation origin",
-                 "translation source hash", "translation generated at"):
+        if "翻訳出典" in jph or h in ("translation provenance",):
+            col_map[idx] = "Translation Provenance"
+            continue
+        if h in ("field label (en)", "translation provenance",
+                 "translation origin", "translation source hash",
+                 "translation generated at"):
             col_map[idx] = API_HEADER_TO_KEY[h]
             continue
         # 2) The 'displayFormat/referenceTo/formula/valueSet' header sits on the
@@ -257,6 +262,8 @@ def parse_object_header(grid: list[list], header_idx: int) -> dict:
         for j, c in enumerate(cells):
             if c in ("表示ラベル (EN)", "表示ラベル(EN)", "Object Label (EN)"):
                 meta["Object Label (EN)"] = _first_nonblank(joined, j + 1)
+            elif c in ("Object Translation Provenance", "翻訳出典"):
+                meta["Object Translation Provenance"] = _first_nonblank(joined, j + 1)
             elif c in ("Object Translation Origin",):
                 meta["Object Translation Origin"] = _first_nonblank(joined, j + 1)
             elif c in ("Object Translation Source Hash",):
@@ -303,6 +310,14 @@ def parse_object_header(grid: list[list], header_idx: int) -> dict:
         "enableHistory": eh,
         "enableSearch": es,
     })
+    from translation_lib import unpack_provenance
+    unpack_provenance(
+        meta,
+        packed_key="Object Translation Provenance",
+        origin_key="Object Translation Origin",
+        hash_key="Object Translation Source Hash",
+        gen_key="Object Translation Generated At",
+    )
     return meta
 
 
@@ -350,6 +365,14 @@ def parse_tab(title: str, grid: list[list], object_api_hint: str = "") -> list[d
                "_SheetRow": ridx + 1}
         for idx, key in col_map.items():
             rec[key] = cells[idx] if idx < len(cells) else ""
+        from translation_lib import unpack_provenance
+        unpack_provenance(
+            rec,
+            packed_key="Translation Provenance",
+            origin_key="Translation Origin",
+            hash_key="Translation Source Hash",
+            gen_key="Translation Generated At",
+        )
         # capture page-layout Tab (Z) + section (AA) for downstream page work
         rec["Tab"] = cell_at(cells, "tab")
         rec["Section"] = cell_at(cells, "section")
@@ -373,6 +396,7 @@ def parse_tab(title: str, grid: list[list], object_api_hint: str = "") -> list[d
                 "Name Field Label (EN)": rec.get("Field Label (EN)", ""),
                 "Name Field Type": rec.get("Data Type", ""),
                 "Name Field Display Format": rec.get("Type Specific Value", ""),
+                "Name Translation Provenance": rec.get("Translation Provenance", ""),
                 "Name Translation Origin": rec.get("Translation Origin", ""),
                 "Name Translation Source Hash": rec.get("Translation Source Hash", ""),
                 "Name Translation Generated At": rec.get("Translation Generated At", ""),

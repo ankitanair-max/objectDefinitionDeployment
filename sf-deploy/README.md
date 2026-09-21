@@ -84,17 +84,18 @@ Provider order (one provider per batch):
 2. Otherwise Google Sheets `=GOOGLETRANSLATE(...)` formulas; calculated values
    (not the formula text) are validated and deployed.
 
-Sheet I/O for translation uses the same Google Sheets API credentials as
-`fetch_sheet.py` / `write_back.py` (already authenticated today). There is no
-separate MCP sheet adapter.
+Sheet I/O uses the Cursor/Claude Google Workspace MCP session that is already
+authenticated. There is no extra MCP sheet adapter, no GCP quota project, and
+no `gcloud` Application Default Credentials step.
 
 Optional DeepL MCP: set `MCP_DEEPL_COMMAND` / `MCP_DEEPL_SERVER` / `MCP_DEEPL_URL`.
-DeepL is the only MCP dependency; Google Translate formulas run in the sheet.
+Google Translate formulas still run in the sheet when DeepL is not configured.
 Force a provider in tests with `--force-provider google|deepl`.
 
-Provenance lives on the object tab (`Translation Origin`, `Translation Source Hash`,
-`Translation Generated At`) so another machine can re-run without local `.build`
-state. Japanese source changes replace previous English automatically.
+Provenance lives in one `Translation Provenance` column immediately to the
+right of `Field Label (EN)` (`origin | ja-hash | generated-at`). It is stamped
+on custom and standard field rows. Japanese source changes replace previous
+English automatically.
 
 Tests: from `sf-deploy/`, `PYTHONPATH=scripts python3 -m pytest tests`.
 

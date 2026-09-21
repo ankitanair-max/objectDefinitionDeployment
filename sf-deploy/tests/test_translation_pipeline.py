@@ -42,9 +42,9 @@ def _grid(*, en_header=True, provenance=False, fields=None, obj_en="", name_en="
     header = ["No.", "Is_Standard", "label", "Field Label (EN)" if en_header else "FreeColumnGDC3",
               "fullName", "type", "WIP", "IsDelete"]
     if provenance:
-        header += ["Translation Origin", "Translation Source Hash", "Translation Generated At"]
+        header += ["Translation Provenance"]
     else:
-        header += ["FreeColumnGDC4", "FreeColumnGDC5", "FreeColumnGDC6"]
+        header += ["FreeColumnGDC4"]
     rows = [
         ["表示ラベル", "成約", "オブジェクト名", "TI_Fnt_Deal__c"],
         ["Object Label (EN)", obj_en or ""],
@@ -61,9 +61,10 @@ def _grid(*, en_header=True, provenance=False, fields=None, obj_en="", name_en="
         row = ["", "", f.get("ja", ""), f.get("en", ""), f.get("api", ""), f.get("type", "Text"),
                f.get("wip", ""), f.get("isdelete", "")]
         if provenance:
-            row += [f.get("origin", ""), f.get("hash", ""), f.get("generated", "")]
+            from translation_lib import format_provenance
+            row += [format_provenance(f.get("origin", ""), f.get("hash", ""), f.get("generated", ""))]
         else:
-            row += ["", "", ""]
+            row += [""]
         rows.append(row)
     rows.append(["END[項目]"])
     return rows
@@ -264,6 +265,26 @@ def test_google_formulas_then_calculated_values():
     assert sheet.formula_writes, "GOOGLETRANSLATE formula must be written USER_ENTERED"
     jobs = [j for j in enr.rows_patch if j.get("field_api") == "TI_Fnt_Status__c"]
     assert jobs and jobs[0]["en_new"] == "Translated"  # calculated, not formula
+
+
+def test_standard_fields_get_provenance_next_to_en():
+    grid = _grid(fields=[
+        {"ja": "所有者", "en": "Owner", "api": "OwnerId", "type": "Lookup"},
+        {"ja": "作成日時", "en": "Created Date", "api": "CreatedDate", "type": "DateTime"},
+        {"ja": "ステータス", "en": "Status", "api": "TI_Fnt_Status__c", "type": "Text"},
+    ])
+    sheet = FakeSheet({TAB: grid})
+    enr = run_enrichment(
+        spreadsheet_id="sid", tabs=[TAB], rows=_rows_from_grid(grid),
+        sheet=sheet, apply=True, force_provider="google",
+        grids={TAB: grid},
+        deepl_factory=lambda: FakeDeepL(fail_preflight=True),
+    )
+    prov_fields = {w.field for w in enr.writes if w.note == "provenance"}
+    assert "OwnerId" in prov_fields
+    assert "CreatedDate" in prov_fields
+    assert "TI_Fnt_Status__c" in prov_fields
+    assert "Name" in prov_fields
 
 
 def test_formula_error_blocks():

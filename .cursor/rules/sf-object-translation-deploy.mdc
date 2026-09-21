@@ -8,8 +8,8 @@ alwaysApply: false
 
 English labels for custom objects, the standard Name field, and custom fields
 are produced, validated, planned, deployed, and verified through the existing
-orchestrator. There is no second translation command and no directory-scan
-manifest for translation scope.
+orchestrator. Provenance is also stamped on standard field rows (OwnerId,
+CreatedDate, …). There is no second translation command.
 
 ```
 python scripts/prep_deploy.py --org "<ORG>" --tabs "<TABS>" --phase deploy \
@@ -40,9 +40,11 @@ python scripts/prep_deploy.py --org "<ORG>" --tabs "<TABS>" --phase deploy \
 ## Sheet columns (header-driven)
 
 - `Field Label (EN)`
-- `Translation Origin` (`manual` / `inventory` / `deepl` / `google`)
-- `Translation Source Hash` (normalized JA SHA-256)
-- `Translation Generated At`
+- `Translation Provenance` — one cell immediately to the right of
+  `Field Label (EN)`: `origin | ja-sha256 | generated-at`
+  (`manual` / `inventory` / `deepl` / `google`). Stamped on custom **and**
+  standard field rows. Legacy three-column headers are still read if present,
+  never created.
 
 Missing headers occupy spare `FreeColumnGDC*` cells after confirmation.
 Japanese source changes (hash mismatch) replace previous English, including
@@ -60,8 +62,9 @@ record types.
 - Deploy blank translations.
 - Use API name / JA source / placeholder / formula text as English.
 - Scan or modify tabs that were not selected.
-- Add a Google Workspace MCP sheet adapter — sheet I/O reuses existing
-  `fetch_sheet.py` / `write_back.py` Application Default Credentials.
+- Add a Google Workspace MCP sheet adapter or require a GCP quota project —
+  sheet I/O uses the Cursor/Claude Google Workspace MCP session that is
+  already authenticated.
 - Call Cloud Translation API, a service-account JSON, or an LLM to generate
   English labels.
 - Use Cursor/Claude/another LLM to generate translations.
