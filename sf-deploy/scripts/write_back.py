@@ -29,8 +29,11 @@ from fetch_sheet import (  # noqa: E402
 
 
 def get_write_service():
-    from fetch_sheet import get_sheets_service
-    return get_sheets_service()
+    from googleapiclient.discovery import build
+    import google.auth
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds, _ = google.auth.default(scopes=scopes)
+    return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
 def col_letter(idx0: int) -> str:

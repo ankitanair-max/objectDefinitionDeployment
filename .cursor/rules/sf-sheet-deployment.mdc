@@ -33,8 +33,9 @@ scope for a new task without re-confirming.
 Working directory is always `sf-deploy/`.
 
 1. **Fetch** — `python scripts/fetch_sheet.py --spreadsheet-id <ID> [--tabs "<tab1,tab2>"]`
-   Produces `temp_updates.json`. Uses Google Workspace MCP (`mcp-adaptor`),
-   the same login as Claude/Cursor — not gcloud ADC.
+   Produces `temp_updates.json`. Uses the caller's Google credentials (ADC via
+   `gcloud auth application-default login` with Sheets/Drive scopes, or
+   `GOOGLE_SERVICE_ACCOUNT_JSON`). No GCP quota project.
 2. **Validate (HARD GATE)** — `python scripts/validate_sheet.py --in temp_updates.json --json .build/validation_report.json`
    - If the report has **any ERROR**, STOP. Do not generate XML, do not build a
      package, do not deploy. Show the user the failing rows and ask them to fix

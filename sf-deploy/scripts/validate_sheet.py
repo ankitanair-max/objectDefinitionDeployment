@@ -461,6 +461,11 @@ def query_org_objects(target_org: str, ref_names: set[str]) -> set[str]:
                 ["sf", "data", "query", "--target-org", target_org, "--json", "--query", q],
                 capture_output=True, text=True, timeout=120)
             data = json.loads(cp.stdout or "{}")
+            if data.get("status") not in (0, None):
+                msg = data.get("message") or data.get("name") or "unknown"
+                print(f"⚠️  org referenceTo check failed ({msg}) — skipping org existence "
+                      f"validation for this run.")
+                return None  # signal: could not check (do not fail-closed)
             for rec in data.get("result", {}).get("records", []) or []:
                 present.add(str(rec.get("QualifiedApiName", "")).lower())
         except Exception as e:

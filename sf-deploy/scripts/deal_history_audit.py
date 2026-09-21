@@ -5,6 +5,7 @@ sys.path.insert(0, "scripts")
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 from google.auth.transport.requests import Request
+import google.auth
 import openpyxl
 
 SID = "1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ"
@@ -16,10 +17,7 @@ if sa:
     info = json.loads(sa) if sa.startswith("{") else (json.load(open(sa)) if (sa.startswith("/") or sa.lower().endswith(".json")) else json.loads(base64.b64decode(sa)))
     creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
 else:
-    raise SystemExit(
-        "deal_history_audit.py is a one-off Drive revision tool and is not on "
-        "the deploy path. It does not use gcloud ADC."
-    )
+    creds, _ = google.auth.default(scopes=scopes)
 creds.refresh(Request())
 drive = build("drive", "v3", credentials=creds, cache_discovery=False)
 

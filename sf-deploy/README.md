@@ -7,7 +7,7 @@ here.
 ```
 sf-deploy/
 ├── scripts/
-│   ├── fetch_sheet.py      1. Google Sheet  → temp_updates.json   (Google Workspace MCP)
+│   ├── fetch_sheet.py      1. Google Sheet  → temp_updates.json   (your ADC creds)
 │   ├── validate_sheet.py   2. temp_updates.json → PASS/FAIL log   (deployment gate)
 │   ├── generate_xml.py     3. temp_updates.json → force-app/**    (reused generator)
 │   ├── build_manifest.py   4. force-app → manifest/package.xml (+ destructiveChanges)
@@ -26,7 +26,12 @@ sf-deploy/
 # Salesforce CLI (already present: /usr/local/bin/sf)
 sf --version
 
-# Python 3. Sheet I/O uses Google Workspace MCP (mcp-adaptor), not gcloud ADC.
+# Python deps for the fetch step
+pip3 install google-api-python-client google-auth
+
+# Google auth — deploy/read the sheet AS YOU (not a service account)
+gcloud auth application-default login \
+  --scopes=https://www.googleapis.com/auth/spreadsheets.readonly,https://www.googleapis.com/auth/drive.readonly
 
 # Connect your Salesforce org
 sf org login web --alias "ERP DEV 02"
@@ -79,9 +84,9 @@ Provider order (one provider per batch):
 2. Otherwise Google Sheets `=GOOGLETRANSLATE(...)` formulas; calculated values
    (not the formula text) are validated and deployed.
 
-Sheet I/O is `fetch_sheet.py` / `write_back.py` via Google Workspace MCP
-(`mcp-adaptor --server google_workspace`) — the same login Claude/Cursor already
-uses. gcloud Application Default Credentials are not used.
+Sheet I/O is the original `fetch_sheet.py` / `write_back.py` path: Application
+Default Credentials (`gcloud auth application-default login` with Sheets/Drive
+scopes) or `GOOGLE_SERVICE_ACCOUNT_JSON`. No GCP quota project is required.
 
 Optional DeepL MCP: set `MCP_DEEPL_COMMAND` / `MCP_DEEPL_SERVER` / `MCP_DEEPL_URL`.
 Google Translate formulas still run in the sheet when DeepL is not configured.

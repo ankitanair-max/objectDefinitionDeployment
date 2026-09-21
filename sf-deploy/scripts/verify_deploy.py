@@ -107,7 +107,8 @@ def org_translation_labels(obj: str, org: str, lang: str = "en_US") -> dict:
         tokinfo["accessToken"], tokinfo["instanceUrl"].rstrip("/"), tokinfo["apiVersion"])
     if not recs:
         return {}
-    model = jsonable_translation(parse_object_translation_el(recs[0], obj, lang))
+    rec, raw = recs[0]
+    model = jsonable_translation(parse_object_translation_el(rec, obj, lang, raw_xml=raw))
     labels = {"__object__": model.get("object_label") or "", "Name": model.get("name_field_label") or ""}
     for name, f in (model.get("fields") or {}).items():
         labels[name] = f.get("label") or ""
@@ -115,18 +116,32 @@ def org_translation_labels(obj: str, org: str, lang: str = "en_US") -> dict:
 
 
 def verify_translations(plan: dict, org: str) -> bool:
-    ok = True
-    packaged = [t for t in (plan.get("translations") or []) if t.get("package")]
-    if not packaged:
-        print("      (no packaged translations to verify)")
+    """Compare EVERY in-scope sheet English label to the live org.
+
+    Name-existence is not enough: an existing field whose Field Label (EN) or
+    provenance changed must still match. Checking only packaged rows is how a
+    later Google/manual EN edit was reported 'complete' while the org stayed on
+    the previous translation.
+    """
+    skip_codes = {"MISSING_TRANSLATION", "SCHEMA_MISSING", "WIP", "ISDELETE"}
+    entries = []
+    for t in plan.get("translations") or []:
+        if t.get("code") in skip_codes:
+            continue
+        if not (t.get("translation") or "").strip():
+            continue
+        entries.append(t)
+    if not entries:
+        print("      (no sheet English to verify)")
         return True
+    ok = True
     by_obj: dict[str, list] = {}
-    for t in packaged:
+    for t in entries:
         by_obj.setdefault(t["component"], []).append(t)
-    for obj, entries in by_obj.items():
+    for obj, obj_entries in by_obj.items():
         live = org_translation_labels(obj, org, plan.get("language") or "en_US")
         print(f"\n  [EN] {obj}")
-        for t in entries:
+        for t in obj_entries:
             expected = (t.get("translation") or "").strip()
             if t["kind"] == "ObjectLabel":
                 actual = live.get("__object__") or ""
@@ -137,9 +152,10 @@ def verify_translations(plan: dict, org: str) -> bool:
             else:
                 actual = live.get(t["key"]) or ""
                 loc = t["key"]
+            tag = "pkg" if t.get("package") else (t.get("code") or "")
             if actual != expected:
                 ok = False
-                print(f"      ✗ {loc}: org {actual!r} != sheet {expected!r}")
+                print(f"      ✗ {loc}: org {actual!r} != sheet {expected!r}  [{tag}]")
             else:
                 print(f"      ✓ {loc}: {expected!r}")
     return ok

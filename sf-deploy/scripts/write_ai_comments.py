@@ -45,8 +45,10 @@ WIP_TRUE = {"x", "true", "1", "yes", "○", "〇"}
 
 
 def get_write_service():
-    from fetch_sheet import get_sheets_service
-    return get_sheets_service()
+    from googleapiclient.discovery import build
+    import google.auth
+    creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/spreadsheets"])
+    return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
 def col_letter(idx0: int) -> str:

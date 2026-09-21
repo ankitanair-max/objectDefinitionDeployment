@@ -58,7 +58,8 @@ def _text(parent: ET.Element, tag: str, value: str, *, keep_empty: bool = False)
         el.text = value
 
 
-def patch_tree(org: dict | None, overlays: dict[str, dict], obj: str) -> dict:
+def patch_tree(org: dict | None, overlays: dict[str, dict], obj: str,
+               object_master: str = "") -> dict:
     """Return a full in-memory COT model: org fields + overlay labels."""
     fields = {}
     if org:
@@ -71,6 +72,9 @@ def patch_tree(org: dict | None, overlays: dict[str, dict], obj: str) -> dict:
     object_label = (org or {}).get("object_label") or ""
     name_label = (org or {}).get("name_field_label") or ""
     starts = (org or {}).get("startsWith") or ""
+    # Untranslated org object labels arrive as XML comments, not text. Salesforce
+    # still requires a nonempty top-level caseValues value to apply nameFieldLabel.
+    case_carrier = (org or {}).get("object_label_comment") or object_master or ""
 
     for e in overlays.values():
         if e["component"] != obj:
@@ -89,8 +93,15 @@ def patch_tree(org: dict | None, overlays: dict[str, dict], obj: str) -> dict:
             fields.setdefault(key, {"name": key, "label": "", "help": "",
                                     "relationshipLabel": "", "xml": ""})
             fields[key]["label"] = en
+    case_value = object_label or case_carrier
+    if name_label and not case_value:
+        # Last resort so Name English can land; do not invent object EN from AJ1.
+        case_value = name_label
+    if name_label and not starts:
+        starts = starts_with_for(object_label or name_label)
     return {
         "object_label": object_label,
+        "case_values_value": case_value,
         "name_field_label": name_label,
         "startsWith": starts,
         "fields": fields,
@@ -101,19 +112,26 @@ def render_object_file(model: dict) -> str:
     lines = [
         f'<CustomObjectTranslation xmlns="{NS}">',
     ]
-    if model.get("object_label"):
+    name_label = model.get("name_field_label") or ""
+    case_value = model.get("case_values_value") or model.get("object_label") or ""
+    if name_label and not case_value:
+        raise SystemExit(
+            "⛔ nameFieldLabel requires a nonempty top-level caseValues value "
+            "(Salesforce otherwise Succeeds without applying the Name translation)."
+        )
+    if case_value:
         lines += [
             "    <caseValues>",
             "        <plural>false</plural>",
-            f"        <value>{esc(model['object_label'])}</value>",
+            f"        <value>{esc(case_value)}</value>",
             "    </caseValues>",
             "    <caseValues>",
             "        <plural>true</plural>",
-            f"        <value>{esc(model['object_label'])}</value>",
+            f"        <value>{esc(case_value)}</value>",
             "    </caseValues>",
         ]
-    if model.get("name_field_label"):
-        lines.append(f"    <nameFieldLabel>{esc(model['name_field_label'])}</nameFieldLabel>")
+    if name_label:
+        lines.append(f"    <nameFieldLabel>{esc(name_label)}</nameFieldLabel>")
     if model.get("startsWith"):
         lines.append(f"    <startsWith>{esc(model['startsWith'])}</startsWith>")
     lines.append("</CustomObjectTranslation>")
@@ -197,10 +215,11 @@ def generate(
             continue
         overlays_by_obj.setdefault(e["component"], {})[e["id"]] = e
 
+    masters = plan.get("objectMasters") or {}
     members: list[str] = []
     for obj, overlays in overlays_by_obj.items():
         org = org_translations.get(f"{obj}-{lang}") or org_translations.get(obj)
-        model = patch_tree(org, overlays, obj)
+        model = patch_tree(org, overlays, obj, object_master=masters.get(obj) or "")
         write_object(obj, lang, model, out_root)
         members.append(f"{obj}-{lang}")
         print(f"  translation XML: {obj}-{lang}  "

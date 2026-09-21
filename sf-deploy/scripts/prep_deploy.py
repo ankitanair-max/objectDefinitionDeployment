@@ -58,8 +58,10 @@ SYNC_STATE = Path(".build/translation_sync_state.json")
 
 
 # --------------------------------------------------------------------------- #
-# env helpers: Google Workspace MCP uses the real HOME (mcp-adaptor / keyring);
-# org steps need the sfhome shim so the sf CLI can write its lock/cache files.
+# env helpers: sheet I/O uses ADC (`google.auth.default`) under google_env HOME.
+# Org `sf` steps use the same HOME by default — `.sfhome` is an empty shim
+# (no org aliases) and makes EntityDefinition lookups look like missing
+# referenceTo targets. Pass --sf-home only when a populated shim is required.
 # --------------------------------------------------------------------------- #
 def google_env(args) -> dict:
     e = os.environ.copy()
@@ -177,7 +179,7 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str], dict]
     from translate_enrich import (
         NEEDS_CONFIRMATION, TranslationAbort, merge_into_rows, preview, run_enrichment,
         org_id_from_display, plan_has_members, save_sync_state,
-        build_plan, snapshot_translations, write_plan,
+        build_plan, snapshot_translations, write_plan, print_delta,
     )
 
     rows = json.loads(temp_path.read_text(encoding="utf-8"))
@@ -278,8 +280,19 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str], dict]
     write_plan(plan, DEPLOY_PLAN)
     print(f"      provider={plan.get('provider')}  empty={plan.get('empty')}  "
           f"members={ {k: len(v) for k, v in (plan.get('members') or {}).items()} }")
+    print_delta(plan)
 
     if plan.get("empty"):
+        print("\n[5b] live English check (existing fields — name-delta is not enough)")
+        cp = subprocess.run(
+            ["python3", "scripts/verify_deploy.py", "--target-org", args.org,
+             "--objects", ",".join(objs), "--plan", str(DEPLOY_PLAN),
+             "--org-snapshot", str(ORG_SNAPSHOT)],
+            env=sf_env(args), text=True)
+        if cp.returncode != 0:
+            raise SystemExit(
+                "⛔ sheet English differs from the org on an existing field. "
+                "That is a translation delta and must be packaged — not an empty plan.")
         print("\n" + "-" * 72)
         print("  BUILD OK — empty plan (unchanged sheet + org). No metadata, no deploy.")
         print("-" * 72)
@@ -349,7 +362,17 @@ def deploy_phase(args, temp_path: Path, objs: list[str], tab_of: dict[str, str],
     print("=" * 72)
 
     if plan.get("empty"):
-        print("  empty plan — no org write (idempotent re-run).")
+        print("  empty package — no metadata write. Still verifying sheet English vs org.")
+        cp = subprocess.run(
+            ["python3", "scripts/verify_deploy.py", "--target-org", args.org,
+             "--objects", ",".join(objs), "--plan", str(DEPLOY_PLAN),
+             "--org-snapshot", str(ORG_SNAPSHOT)],
+            env=sf_env(args), text=True)
+        if cp.returncode != 0:
+            raise SystemExit(
+                "⛔ VERIFICATION FAILED — sheet English still differs from the org "
+                "(existing-field label/provenance edits are a translation delta, "
+                "not a new-field delta). Do not report success.")
         print("=" * 72)
         return 0
 
@@ -387,10 +410,14 @@ def deploy_phase(args, temp_path: Path, objs: list[str], tab_of: dict[str, str],
         raise SystemExit("⛔ VERIFICATION FAILED — the deploy did NOT fully land. "
                          "Do not report success; investigate before retrying.")
 
-    packaged = [t for t in (plan.get("translations") or []) if t.get("package")]
-    if packaged:
-        save_sync_state(SYNC_STATE, plan.get("orgId") or args.org, packaged)
-        print(f"      translation sync state written for orgId={plan.get('orgId')}")
+    to_sync = [t for t in (plan.get("translations") or [])
+               if (t.get("translation") or "").strip()
+               and t.get("code") not in {"MISSING_TRANSLATION", "SCHEMA_MISSING",
+                                         "WIP", "ISDELETE"}]
+    if to_sync:
+        save_sync_state(SYNC_STATE, plan.get("orgId") or args.org, to_sync)
+        print(f"      translation sync state written for orgId={plan.get('orgId')} "
+              f"({len(to_sync)} label(s))")
 
     print("\n[3/3] refresh deployment report tabs")
     for o in objs:
@@ -423,7 +450,7 @@ def main() -> int:
     ap.add_argument("--out", default="temp_updates.json")
     ap.add_argument("--workbook", default="reports/Object_Deployment_Report.xlsx")
     ap.add_argument("--google-home", default=os.environ.get("SEAP_GOOGLE_HOME", str(Path.home())))
-    ap.add_argument("--sf-home", default=str(Path(".sfhome").resolve()))
+    ap.add_argument("--sf-home", default=os.environ.get("HOME", str(Path.home())))
     ap.add_argument("--xdg-data-home", default=str(Path.home() / ".local" / "share"))
     ap.add_argument("--apply-translations", action="store_true",
                     help="write the confirmed translation batch (gated sheet write)")

@@ -76,7 +76,11 @@ def col_letter(idx0: int) -> str:
 
 
 def write_service():
-    return get_sheets_service()
+    from googleapiclient.discovery import build
+    import google.auth
+    creds, _ = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/spreadsheets"])
+    return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
 def org_custom_fields(obj_api: str, target_org: str) -> set[str]:

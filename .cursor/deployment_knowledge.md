@@ -23,6 +23,44 @@ entries on top. Written by the self-correction loop (see
 
 ## Lessons
 
+### [2026-09-21] Existing-field EN/provenance edit skipped by name-delta
+- **Error signature:** sheet `TI_Fnt_MoveInDestination__c` EN `Delivery destination` (google provenance) while org still had `Move-in destination`; first `--phase deploy` reported complete because the field already existed
+- **Command:** `python scripts/prep_deploy.py --org ERPDEV01 --tabs ShipoutMovein --phase deploy`
+- **Component:** CustomObjectTranslation `TI_Fnt_ShipoutMovein__c-en_US` / `TI_Fnt_MoveInDestination__c`
+- **Category:** Tooling
+- **Extracted failure lines:**
+    sheet EN/provenance changed; field not in schema delta; verify only checked packaged rows
+- **Root cause:** Schema delta is name-only (`sheet fields − org fields`). An existing field whose English or provenance changed is excluded from the create package. Translation classify can pick `CHANGED_TRANSLATION`, but (1) that delta was not printed next to the schema delta, (2) `verify_deploy` only compared packaged rows, (3) an empty plan after a later EN edit still reported success, (4) sync state stored only packaged labels so a Google overwrite on an already-translated field was easy to miss if completeness was inferred from field existence.
+- **Fix applied:** `classify_against_org` also diffs sheet EN against last deployed sync-state hash; `print_delta` always prints TRANSLATIONS new/changed; `verify_deploy` compares every in-scope sheet EN to the live org; empty plans still run that verify; sync state stores every verified label.
+- **Prevention added:** STEP 2 §3c in `sf-deploy-delta-and-blockers.mdc` — translation EN/provenance drift is a mandatory delta, independent of field name-existence.
+- **Status:** Resolved
+
+### [2026-09-21] Empty .sfhome shim → false missing-referenceTo ERROR
+- **Error signature:** `dependency.ref.org: referenceTo 'TI_Fnt_Shipping__c' does NOT exist in the target org and is not created in this deploy` while EntityDefinition live shows the object present
+- **Command:** `python scripts/prep_deploy.py --org ERPDEV01 --tabs ShipoutMovein --phase deploy`
+- **Component:** `validate_sheet.py` `query_org_objects` / env `HOME=.sfhome`
+- **Category:** Environment/Org
+- **Extracted failure lines:**
+    ❌ [TI_Fnt_ShipoutMovein__c::TI_Fnt_Shipping__c] (dependency.ref.org) referenceTo 'TI_Fnt_Shipping__c' does NOT exist in the target org and is not created in this deploy
+    NamedOrgNotFoundError: No authorization information found for ERPDEV01
+- **Root cause:** `prep_deploy.py` ran `validate_sheet.py` with `HOME=.sfhome`. That shim has empty `.sfdx/alias.json` (`{"orgs":{}}`), so `sf data query --target-org ERPDEV01` returns status=2 JSON with no `result.records`. `query_org_objects` treated that as a successful empty set, so every custom `referenceTo` looked missing. The parent object actually exists in ERPDEV01.
+- **Fix applied:** `query_org_objects` returns None (skip live check, fail-open) when `sf` JSON `status != 0`. `prep_deploy.py` `--sf-home` defaults to the real HOME so org aliases resolve.
+- **Prevention added:** non-zero `sf` query status is never interpreted as "object absent".
+- **Status:** Resolved
+
+### [2026-09-21] nameFieldLabel deploy Succeeds but does not apply without nonempty caseValues
+- **Error signature:** live verify `Name: org '' != sheet 'Shipping origin / move-in destination'` after `sf project deploy start` Status: Succeeded for `CustomObjectTranslation TI_Fnt_ShipoutMovein__c-en_US`
+- **Command:** `python scripts/prep_deploy.py --org ERPDEV01 --tabs ShipoutMovein --phase deploy`
+- **Component:** CustomObjectTranslation `TI_Fnt_ShipoutMovein__c-en_US` / `<nameFieldLabel>`
+- **Category:** Schema
+- **Extracted failure lines:**
+    ✗ Name: org '' != sheet 'Shipping origin / move-in destination'
+    VERIFICATION FAILED — the deploy did NOT fully land.
+- **Root cause:** Salesforce Metadata API docs: when deploying a change to `nameFieldLabel`, the payload MUST include at least one top-level `<caseValues>` entry with a nonempty `<value>`. Otherwise the deploy reports Succeeded but the Name translation is not applied. The generator emitted only `<nameFieldLabel>` (no Object Label EN on this tab, org caseValues were comment-only `<!-- 日本語 -->`). Custom field labels landed; Name did not. `findtext("nameFieldLabel")` then correctly read empty text from the org.
+- **Fix applied:** `generate_object_translation.py` always emits nonempty top-level `caseValues` when packaging `nameFieldLabel`, using (1) sheet Object Label EN, else (2) org comment / sheet Japanese object master as a carrier so we do not invent object English from AJ1, else (3) the Name English as last resort. Guard raises if Name is packaged with blank caseValues. `read_metadata` keeps the raw SOAP fragment so comment-only labels can be used as that carrier without being treated as live English.
+- **Prevention added:** generator hard-fail if `nameFieldLabel` would be written without a nonempty `caseValues` value — the same silent Salesforce no-op cannot be packaged again.
+- **Status:** Resolved
+
 ### [2026-09-21] CustomFieldTranslation for standard Name → Cannot translate standard field
 - **Error signature:** `CustomObjectTranslation TI_Fnt_ShipoutMovein__c-en_US: Cannot translate standard field: TI_Fnt_ShipoutMovein__c.Name`
 - **Command:** `python scripts/prep_deploy.py --org ERPDEV01 --tabs ShipoutMovein` (check-only)

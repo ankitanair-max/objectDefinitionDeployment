@@ -145,13 +145,25 @@ and deploy ONLY the new (and, if explicitly requested, changed) fields.
    picklist values, length, visibleLines, precision, scale, required, unique, and
    externalId** (and flags any unmapped Data Type). It writes
    `.build/attr_drift_<Obj>.json`. `prep_deploy.py` runs this automatically in its
-   build phase (step 6b). SURFACE any drift to the user. Redeploying drift is a user decision, not automatic — many type changes
-   (Lookup↔Formula, Checkbox↔Picklist, Text→Lookup) require delete+recreate and
-   DESTROY the field's data, so never silently redeploy a drifted field.
+   build phase (step 6b). SURFACE any drift to the user. Redeploying drift is a
+   user decision, not automatic — many type changes (Lookup↔Formula,
+   Checkbox↔Picklist, Text→Lookup) require delete+recreate and DESTROY the
+   field's data, so never silently redeploy a drifted field.
+3c. **TRANSLATION-LEVEL DRIFT (MANDATORY for fields present in BOTH).** The name
+   delta also does NOT prove the **English label** matches the sheet. A field
+   whose `Field Label (EN)` / `Translation Provenance` changed (Google, DeepL,
+   or a manual edit) while its API name stayed the same is invisible to
+   `sheet_custom_fields − org_existing_fields` and must still be packaged as
+   `CustomObjectTranslation` (`CHANGED_TRANSLATION`). `prep_deploy.py` prints
+   this as a separate TRANSLATIONS delta (new / changed / unchanged). Post-deploy
+   `verify_deploy.py` compares **every** in-scope sheet English value to the live
+   org — not only the rows that happened to be in this package — so a later EN
+   edit cannot be reported as "complete" while the org still has the old label.
 4. **Report the delta before deploying:** e.g. "org already has N fields; sheet
    defines M; deploying the D new ones; X already present (skipped); Y org-only
-   (left untouched)." Keep the package limited to the delta so redeploys stay
-   fast and side-effect-free.
+   (left untouched)." **Also report translation new/changed.** Keep the schema
+   package limited to the field-name delta so redeploys stay fast; still include
+   every CHANGED/NEW English label in the translation package.
 5. Package + validate (check-only dry-run) the delta, then deploy for real with
    `deploy.py --start` (the ONLY flag that writes).
 6. **Log every on-the-go fix in TWO places — the value cell AND the AH note.**

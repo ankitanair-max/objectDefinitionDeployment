@@ -507,19 +507,56 @@ def strip_soap_ns(xml: str) -> str:
     return xml
 
 
-def parse_object_translation_el(rec: ET.Element, obj: str, lang: str = SF_LANG) -> dict:
+def _text_and_comment(inner: str) -> tuple[str, str]:
+    """Split element inner XML into (text, first comment body).
+
+    Translation Workbench stores untranslated labels as comments
+    (``<!-- 日本語 -->``) with empty text. ElementTree drops comments, so
+    callers must pass the raw SOAP fragment.
+    """
+    comments = [norm(c) for c in re.findall(r"<!--(.*?)-->", inner or "", flags=re.DOTALL)]
+    stripped = re.sub(r"<!--.*?-->", "", inner or "", flags=re.DOTALL)
+    stripped = re.sub(r"<[^>]+>", "", stripped)
+    return norm(stripped), (comments[0] if comments else "")
+
+
+def _direct_tag_text_comment(xml: str, tag: str) -> tuple[str, str]:
+    m = re.search(rf"<{re.escape(tag)}>(.*?)</{re.escape(tag)}>", xml or "", flags=re.DOTALL)
+    if not m:
+        return "", ""
+    return _text_and_comment(m.group(1))
+
+
+def _first_singular_case_value(xml: str) -> tuple[str, str]:
+    for inner in re.findall(r"<caseValues>(.*?)</caseValues>", xml or "", flags=re.DOTALL):
+        if re.search(r"<plural>\s*true\s*</plural>", inner, flags=re.I):
+            continue
+        vm = re.search(r"<value>(.*?)</value>", inner, flags=re.DOTALL)
+        if vm:
+            return _text_and_comment(vm.group(1))
+    return "", ""
+
+
+def parse_object_translation_el(rec: ET.Element, obj: str, lang: str = SF_LANG,
+                                raw_xml: str = "") -> dict:
     """SOAP/mdapi CustomObjectTranslation record → overlay-friendly dict.
 
     Keeps raw field element XML so unrelated picklist/help/rel nodes survive.
+    Comment-only labels (untranslated) are stored separately and never treated
+    as live English.
     """
     fields: dict[str, dict] = {}
-    object_label = ""
-    name_field_label = norm(rec.findtext("nameFieldLabel") or "")
-    for cv in rec.findall("caseValues"):
-        plural = (cv.findtext("plural") or "").lower() == "true"
-        val = norm(cv.findtext("value"))
-        if val and not plural:
-            object_label = val
+    raw = raw_xml or ET.tostring(rec, encoding="unicode")
+    object_label, object_label_comment = _first_singular_case_value(raw)
+    if not object_label:
+        for cv in rec.findall("caseValues"):
+            plural = (cv.findtext("plural") or "").lower() == "true"
+            val = norm(cv.findtext("value"))
+            if val and not plural:
+                object_label = val
+    name_field_label, name_field_label_comment = _direct_tag_text_comment(raw, "nameFieldLabel")
+    if not name_field_label:
+        name_field_label = norm(rec.findtext("nameFieldLabel") or "")
     for f in rec.findall("fields"):
         name = norm(f.findtext("name"))
         if not name:
@@ -531,15 +568,19 @@ def parse_object_translation_el(rec: ET.Element, obj: str, lang: str = SF_LANG) 
             "relationshipLabel": norm(f.findtext("relationshipLabel")),
             "xml": ET.tostring(f, encoding="unicode"),
         }
-    starts = norm(rec.findtext("startsWith"))
+    starts, _starts_comment = _direct_tag_text_comment(raw, "startsWith")
+    if not starts:
+        starts = norm(rec.findtext("startsWith"))
     return {
         "object": obj,
         "language": lang,
         "object_label": object_label,
+        "object_label_comment": object_label_comment,
         "name_field_label": name_field_label,
+        "name_field_label_comment": name_field_label_comment,
         "startsWith": starts,
         "fields": fields,
-        "raw_xml": ET.tostring(rec, encoding="unicode"),
+        "raw_xml": raw,
     }
 
 
@@ -566,6 +607,7 @@ def empty_plan(*, org: str = "", org_id: str = "", tabs: list | None = None,
         "members": {},
         "translations": [],
         "schema": {"new_objects": [], "new_fields": [], "existing_objects": []},
+        "objectMasters": {},
         "empty": True,
     }
 
@@ -622,9 +664,9 @@ def load_token(org: str, token_file: str = ".build/orgauth.json") -> dict:
 
 
 def read_metadata(mtype: str, full_names: list[str], tok: str, inst: str,
-                  ver: str) -> list[ET.Element]:
+                  ver: str) -> list[tuple[ET.Element, str]]:
     import urllib.error, urllib.request
-    records: list[ET.Element] = []
+    records: list[tuple[ET.Element, str]] = []
     names = [n for n in full_names if n]
     for i in range(0, len(names), 10):
         chunk = names[i:i + 10]
@@ -645,11 +687,17 @@ def read_metadata(mtype: str, full_names: list[str], tok: str, inst: str,
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
             raise SystemExit(f"❌ readMetadata {mtype} HTTP {e.code}: {body[:400]}")
-        root = ET.fromstring(strip_soap_ns(xml))
-        for rec in root.findall(".//records"):
+        stripped = strip_soap_ns(xml)
+        for m in re.finditer(r"<records\b[^>]*>.*?</records>", stripped, flags=re.DOTALL):
+            frag = m.group(0)
+            try:
+                rec = ET.fromstring(frag)
+            except ET.ParseError:
+                continue
             if rec.find("fullName") is not None or rec.find("fields") is not None \
-                    or rec.find("caseValues") is not None:
-                records.append(rec)
+                    or rec.find("caseValues") is not None \
+                    or rec.find("nameFieldLabel") is not None:
+                records.append((rec, frag))
     return records
 
 
@@ -681,6 +729,7 @@ def jsonable_translation(model: dict) -> dict:
         "object": model.get("object"),
         "language": model.get("language"),
         "object_label": model.get("object_label"),
+        "object_label_comment": model.get("object_label_comment"),
         "name_field_label": model.get("name_field_label"),
         "startsWith": model.get("startsWith"),
         "fields": fields,
@@ -731,7 +780,8 @@ def entries_from_rows(rows: list[dict], lang: str = SF_LANG) -> list[dict]:
 
 def classify_against_org(sheet_entries: list[dict], org_models: dict[str, dict],
                          org_fields: dict[str, set[str]],
-                         org_objects: set[str]) -> list[dict]:
+                         org_objects: set[str],
+                         sync_entries: dict | None = None) -> list[dict]:
     out = []
     for e in sheet_entries:
         rec = dict(e)
@@ -779,13 +829,19 @@ def classify_against_org(sheet_entries: list[dict], org_models: dict[str, dict],
             rec["reason"] = "target field absent from org and not in schema plan"
             out.append(rec)
             continue
+        sheet_hash = content_hash(en)
+        org_matches = bool(org_label) and sheet_hash == content_hash(org_label)
+        prev = (sync_entries or {}).get(e["id"]) or {}
+        prev_hash = norm(prev.get("hash"))
+        last_matches = (not prev_hash) or prev_hash == sheet_hash
         if not org_label:
             rec["code"] = NEW
             rec["package"] = True
             rec["reason"] = "no en_US translation in org"
             out.append(rec)
             continue
-        if content_hash(en) == content_hash(org_label):
+        rec["org_translation"] = org_label
+        if org_matches and last_matches:
             rec["code"] = UNCHANGED
             rec["package"] = False
             rec["reason"] = "sheet matches org"
@@ -793,8 +849,10 @@ def classify_against_org(sheet_entries: list[dict], org_models: dict[str, dict],
             continue
         rec["code"] = CHANGED
         rec["package"] = True
-        rec["org_translation"] = org_label
-        rec["reason"] = "sheet English differs from org"
+        rec["reason"] = (
+            "sheet English differs from org" if not org_matches
+            else "sheet English differs from last deployed translation"
+        )
         out.append(rec)
     return out
 
@@ -808,16 +866,13 @@ def snapshot_translations(objs: list[str], org: str, lang: str = SF_LANG) -> dic
     members = [f"{o}-{lang}" for o in objs]
     recs = read_metadata("CustomObjectTranslation", members, tok, inst, ver)
     out = {}
-    for rec, obj in zip(recs, objs):
-        # readMetadata may return fewer records when language/object missing
-        pass
     # Map by fullName when present.
-    for rec in recs:
+    for rec, raw in recs:
         full = norm(rec.findtext("fullName") or "")
         obj = full.rsplit("-", 1)[0] if full else ""
         if not obj:
             continue
-        model = parse_object_translation_el(rec, obj, lang)
+        model = parse_object_translation_el(rec, obj, lang, raw_xml=raw)
         out[f"{obj}-{lang}"] = jsonable_translation(model)
     return out
 
@@ -853,6 +908,15 @@ def build_plan(
             add_member(plan, "CustomObject", o)
     plan["schema"]["new_objects"] = new_objects
     plan["schema"]["existing_objects"] = existing
+    masters = {}
+    for r in rows:
+        if r.get("_type") != "object_meta":
+            continue
+        api = norm(r.get("Object API Name"))
+        ja = norm(r.get("Object Label"))
+        if api and ja:
+            masters[api] = ja
+    plan["objectMasters"] = masters
 
     sheet_fields: dict[str, list[str]] = {}
     for r in rows:
@@ -875,7 +939,9 @@ def build_plan(
     plan["schema"]["new_fields"] = new_fields
 
     entries = entries_from_rows(rows, lang=lang)
-    classified = classify_against_org(entries, org_translations, present_fields, present_objects)
+    sync = (load_sync_state().get(org_id) or {}).get("entries") or {}
+    classified = classify_against_org(
+        entries, org_translations, present_fields, present_objects, sync_entries=sync)
     plan["translations"] = classified
 
     packaged_objs = set()
@@ -896,6 +962,29 @@ def build_plan(
 
     plan["empty"] = not any(plan.get("members", {}).values())
     return plan
+
+
+def print_delta(plan: dict) -> None:
+    """Surface schema AND translation deltas. Name-existence is not enough."""
+    schema = plan.get("schema") or {}
+    new_fields = schema.get("new_fields") or []
+    existing = schema.get("existing_objects") or []
+    new_objs = schema.get("new_objects") or []
+    trans = plan.get("translations") or []
+    changed = [t for t in trans if t.get("code") == CHANGED]
+    new_t = [t for t in trans if t.get("code") == NEW]
+    unchanged = [t for t in trans if t.get("code") == UNCHANGED]
+    print(f"      SCHEMA       new_objects={len(new_objs)}  new_fields={len(new_fields)}  "
+          f"existing_objects={len(existing)}")
+    print(f"      TRANSLATIONS new={len(new_t)}  changed={len(changed)}  "
+          f"unchanged={len(unchanged)}")
+    for t in new_t:
+        print(f"        NEW     {t.get('key')}: {t.get('translation')!r}")
+    for t in changed:
+        print(f"        CHANGED {t.get('key')}: org {t.get('org_translation')!r} "
+              f"→ sheet {t.get('translation')!r}")
+    if not new_t and not changed and not new_fields and not new_objs:
+        print("        (no schema or translation delta)")
 
 
 def write_plan(plan: dict, path: str | Path = ".build/deploy_plan.json") -> Path:
