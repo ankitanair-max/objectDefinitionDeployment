@@ -79,7 +79,7 @@ class FakeSheet:
         return self.grids[tab]
 
     def read_cells(self, sid, tab, cells):
-        from mcp_sheets import cell_at, parse_a1
+        from translation_lib import cell_at, parse_a1
         out = {}
         grid = self.grids[tab]
         for c in cells:
@@ -100,7 +100,7 @@ class FakeSheet:
         return {c: "Translated" for c in cells}
 
     def _apply(self, updates):
-        from mcp_sheets import parse_a1
+        from translation_lib import parse_a1
         for u in updates:
             rng = u["range"]
             tab, cell = rng.split("!", 1)

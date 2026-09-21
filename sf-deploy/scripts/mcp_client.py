@@ -2,11 +2,12 @@
 """
 mcp_client.py — JSON-RPC client for an already-authenticated MCP server.
 
-A standalone Python process does NOT inherit Cursor/Claude MCP tool handles.
-This adapter talks to `mcp-adaptor` (or any MCP server) over stdio or
-streamable HTTP, using the user's existing Salesforce Google SSO session.
+Used for optional DeepL translation. A standalone Python process does NOT
+inherit Cursor/Claude MCP tool handles, so this talks to `mcp-adaptor` (or
+any MCP server) over stdio or streamable HTTP.
 
-No GCP project, quota project, gcloud, or service-account credential is used.
+Sheet I/O is NOT here — it uses the existing Google Sheets API client in
+fetch_sheet.py / write_back.py.
 """
 from __future__ import annotations
 
@@ -278,8 +279,8 @@ class McpClient:
             body = e.read().decode("utf-8", errors="replace")
             if e.code in (401, 403) or is_auth_failure(body):
                 raise McpAuthError(
-                    "Google Workspace MCP authentication failed "
-                    f"(HTTP {e.code}). Run: mcp-adaptor auth\n{body[:400]}"
+                    f"MCP authentication failed (HTTP {e.code}). "
+                    f"Run: mcp-adaptor auth\n{body[:400]}"
                 ) from e
             raise McpError(f"MCP HTTP {e.code}: {body[:400]}") from e
         except urllib.error.URLError as e:
@@ -345,23 +346,6 @@ def _content_text(result: dict) -> str:
         elif isinstance(item, str):
             chunks.append(item)
     return "\n".join(chunks)
-
-
-def google_workspace_client(**kwargs) -> McpClient:
-    """Client for provider `google-workspace-rw` via mcp-adaptor stdio."""
-    bin_path = _default_adaptor_bin()
-    command = kwargs.pop("command", "") or os.environ.get(
-        "MCP_SHEETS_COMMAND", bin_path
-    )
-    raw_args = os.environ.get("MCP_SHEETS_ARGS", "")
-    if "args" in kwargs:
-        args = kwargs.pop("args")
-    elif raw_args:
-        args = raw_args.split()
-    else:
-        args = ["--server", os.environ.get("MCP_SHEETS_SERVER", "google_workspace")]
-    url = kwargs.pop("url", "") or os.environ.get("MCP_SHEETS_URL", "")
-    return McpClient(command=command, args=args, url=url, **kwargs)
 
 
 def deepl_client(**kwargs) -> McpClient | None:

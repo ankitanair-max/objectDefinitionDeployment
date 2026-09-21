@@ -148,6 +148,26 @@ def a1(col0: int, row1: int) -> str:
     return f"{col_letter(col0)}{row1}"
 
 
+def parse_a1(cell: str) -> tuple[int, int]:
+    m = re.match(r"^\$?([A-Za-z]+)\$?(\d+)$", cell.strip())
+    if not m:
+        raise ValueError(f"not an A1 cell: {cell!r}")
+    letters, row = m.group(1).upper(), int(m.group(2))
+    col = 0
+    for ch in letters:
+        col = col * 26 + (ord(ch) - 64)
+    return col - 1, row
+
+
+def cell_at(grid: list[list[str]], row0: int, col0: int) -> str:
+    if row0 < 0 or row0 >= len(grid):
+        return ""
+    row = grid[row0]
+    if col0 < 0 or col0 >= len(row):
+        return ""
+    return str(row[col0] or "").strip()
+
+
 def esc(s: str) -> str:
     return sx.escape(norm(s), {"'": "&apos;", '"': "&quot;"})
 

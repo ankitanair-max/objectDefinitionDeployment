@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from mcp_deepl import DeepLProvider, DeepLTranslateError, DeepLUnavailable
-from mcp_sheets import SheetClient, a1 as sheets_a1, cell_at
+from sheet_client import SheetClient
 from translation_lib import (
     FIELD_EN_HEADER,
     GENERATED_HEADER,
@@ -37,6 +37,8 @@ from translation_lib import (
     ORIGIN_HEADER,
     ORIGIN_MANUAL,
     SF_LANG,
+    a1 as sheets_a1,
+    cell_at,
     classify_need,
     content_hash,
     google_formula,

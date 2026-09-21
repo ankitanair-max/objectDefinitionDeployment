@@ -84,12 +84,12 @@ Provider order (one provider per batch):
 2. Otherwise Google Sheets `=GOOGLETRANSLATE(...)` formulas; calculated values
    (not the formula text) are validated and deployed.
 
-Google Workspace access for translation I/O uses the Salesforce
-`google-workspace-rw` MCP via `mcp-adaptor` (your Google SSO). It does **not**
-require a GCP project, `gcloud`, or a service-account JSON. Authenticate once
-with `mcp-adaptor auth`.
+Sheet I/O for translation uses the same Google Sheets API credentials as
+`fetch_sheet.py` / `write_back.py` (already authenticated today). There is no
+separate MCP sheet adapter.
 
-Optional DeepL: set `MCP_DEEPL_COMMAND` / `MCP_DEEPL_SERVER` / `MCP_DEEPL_URL`.
+Optional DeepL MCP: set `MCP_DEEPL_COMMAND` / `MCP_DEEPL_SERVER` / `MCP_DEEPL_URL`.
+DeepL is the only MCP dependency; Google Translate formulas run in the sheet.
 Force a provider in tests with `--force-provider google|deepl`.
 
 Provenance lives on the object tab (`Translation Origin`, `Translation Source Hash`,

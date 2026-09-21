@@ -173,7 +173,7 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str], dict]
     # 2) automatic translation enrichment (DeepL or Google — one provider/batch)
     print("\n[2/8] translation enrichment (JA → en_US)")
     sys.path.insert(0, "scripts")
-    from mcp_sheets import SheetClient
+    from sheet_client import SheetClient
     from translate_enrich import (
         NEEDS_CONFIRMATION, TranslationAbort, merge_into_rows, preview, run_enrichment,
     )
@@ -230,7 +230,7 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str], dict]
             run(["python3", "scripts/fetch_sheet.py",
                  "--spreadsheet-id", args.sheet_id, "--tabs", args.tabs,
                  "--out", str(temp_path)], google_env(args), capture=True)
-            # Overlay calculated EN from enrichment (MCP read of calculated values)
+            # Overlay calculated EN from enrichment (Sheets formatted values)
             fetched = json.loads(temp_path.read_text(encoding="utf-8"))
             fetched = merge_into_rows(fetched, enr.rows_patch)
             temp_path.write_text(json.dumps(fetched, ensure_ascii=False, indent=2),
