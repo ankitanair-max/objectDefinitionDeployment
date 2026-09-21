@@ -90,14 +90,12 @@ no `gcloud` Application Default Credentials step.
 
 Optional DeepL MCP: set `MCP_DEEPL_COMMAND` / `MCP_DEEPL_SERVER` / `MCP_DEEPL_URL`.
 Google Translate formulas still run in the sheet when DeepL is not configured.
-Force a provider in tests with `--force-provider google|deepl`.
+Force a provider with `--force-provider google|deepl`.
 
 Provenance lives in one `Translation Provenance` column immediately to the
 right of `Field Label (EN)` (`origin | ja-hash | generated-at`). It is stamped
 on custom and standard field rows. Japanese source changes replace previous
 English automatically.
-
-Tests: from `sf-deploy/`, `PYTHONPATH=scripts python3 -m pytest tests`.
 
 ### Incremental (only changed / new fields)
 
