@@ -23,6 +23,30 @@ entries on top. Written by the self-correction loop (see
 
 ## Lessons
 
+### [2026-09-21] CustomFieldTranslation for standard Name → Cannot translate standard field
+- **Error signature:** `CustomObjectTranslation TI_Fnt_ShipoutMovein__c-en_US: Cannot translate standard field: TI_Fnt_ShipoutMovein__c.Name`
+- **Command:** `python scripts/prep_deploy.py --org ERPDEV01 --tabs ShipoutMovein` (check-only)
+- **Component:** CustomObjectTranslation `TI_Fnt_ShipoutMovein__c-en_US` / `Name.fieldTranslation-meta.xml`
+- **Category:** Schema
+- **Extracted failure lines:**
+    │ CustomObjectTranslation │ TI_Fnt_ShipoutMovein__c-en_US │ Cannot translate standard field: TI_Fnt_ShipoutMovein__c.Name (4:13) │ 4:13        │
+- **Root cause:** Salesforce translates the object's standard Name via `<nameFieldLabel>` on CustomObjectTranslation. Emitting `Name.fieldTranslation-meta.xml` (CustomFieldTranslation) is rejected as translating a standard field.
+- **Fix applied:** `generate_object_translation.py` writes Name English only to `<nameFieldLabel>`, never as a field translation file (and deletes a leftover `Name.fieldTranslation-meta.xml`).
+- **Prevention added:** generator skip for `name == "Name"` in both org-field copy and field-file emit, so the illegal file cannot be packaged again.
+- **Status:** Resolved
+
+### [2026-09-21] Missing sfdx-project.json → InvalidProjectWorkspaceError on dry-run
+- **Error signature:** `Error (InvalidProjectWorkspaceError): …/sf-deploy does not contain a valid Salesforce DX project.`
+- **Command:** `python scripts/prep_deploy.py --org ERPDEV01 --tabs ShipoutMovein` → `sf project deploy start --manifest manifest/package.xml --dry-run`
+- **Component:** Tooling / project workspace (`sfdx-project.json`), not a metadata member
+- **Category:** Tooling
+- **Extracted failure lines:**
+    Error (InvalidProjectWorkspaceError): /Users/ankita.nair/Documents/objectDefinitionDeployment-main/sf-deploy does not contain a valid Salesforce DX project.
+- **Root cause:** `sf project deploy` requires a DX project file in the cwd. README listed `sf-deploy/sfdx-project.json` but the file was never in the repo, so check-only failed before any metadata was sent.
+- **Fix applied:** added `sf-deploy/sfdx-project.json` (`packageDirectories.path = force-app`, `sourceApiVersion` 60.0, matching `build_manifest.py` default).
+- **Prevention added:** `deploy.py` refuses to invoke `sf` unless `sfdx-project.json` is present in the working directory, with a clear missing-file error instead of the CLI workspace message.
+- **Status:** Resolved
+
 ### [2026-09-11] FLS grant was DELTA/local-file scoped → historical gaps never backfilled (106 fields across 11 objects)
 - **Error signature:** Yagai report + live audit — fields deployed in earlier batches lacked `FieldPermissions` on `SalesFrontAdmin` even though later deploys "granted FLS". True classified gap: **106** deployable custom fields with no FLS (e.g. ExportImportRelatedInfo 36, Shipping 33, ShippingDetail 14, DeliveryDestination 9, IncidentalExpenses/StandaloneIE 4 each).
 - **Command:** N/A (post-deploy access gap). Surfaced via live `CustomField` (Tooling) vs `FieldPermissions` diff, then classified via `readMetadata(CustomObject)`.

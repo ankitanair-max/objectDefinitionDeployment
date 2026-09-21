@@ -45,7 +45,7 @@ AH_HEADER_NEW = "GDC AI Tool Comments"
 AI_HEADER_NEW = "Deployment Status"
 
 # HOME used for the `sf` CLI subprocesses (its auth lives under the .sfhome shim),
-# distinct from the main process HOME which Google ADC needs. Set via --sf-home.
+# distinct from the main process HOME. Set via --sf-home.
 _SF_ENV = dict(os.environ)
 
 
@@ -76,11 +76,7 @@ def col_letter(idx0: int) -> str:
 
 
 def write_service():
-    from googleapiclient.discovery import build
-    import google.auth
-    creds, _ = google.auth.default(
-        scopes=["https://www.googleapis.com/auth/spreadsheets"])
-    return build("sheets", "v4", credentials=creds, cache_discovery=False)
+    return get_sheets_service()
 
 
 def org_custom_fields(obj_api: str, target_org: str) -> set[str]:
@@ -122,8 +118,7 @@ def main() -> int:
                     help="also rename AH->'GDC AI Tool Comments', AI->'Deployment Status'")
     ap.add_argument("--apply", action="store_true", help="write (default: preview only)")
     ap.add_argument("--sf-home", default="",
-                    help="HOME for the sf CLI subprocesses (its auth shim); the main "
-                         "process HOME stays as-is for Google ADC")
+                    help="HOME for the sf CLI subprocesses (its auth shim)")
     args = ap.parse_args()
 
     if args.sf_home:

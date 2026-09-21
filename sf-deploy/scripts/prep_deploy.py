@@ -58,8 +58,8 @@ SYNC_STATE = Path(".build/translation_sync_state.json")
 
 
 # --------------------------------------------------------------------------- #
-# env helpers: Google steps need the real HOME (ADC); org steps need the sfhome
-# shim (keychain-linked) so the sf CLI can write its lock/cache files.
+# env helpers: Google Workspace MCP uses the real HOME (mcp-adaptor / keyring);
+# org steps need the sfhome shim so the sf CLI can write its lock/cache files.
 # --------------------------------------------------------------------------- #
 def google_env(args) -> dict:
     e = os.environ.copy()

@@ -83,8 +83,7 @@ def query_org_fields(object_api: str, target_org: str, sf_home: str = "", xdg_da
 
     The ``sf`` CLI needs a writable HOME + keychain access; in the sandbox that is
     provided via a workspace-local shim. That shim HOME must NOT leak into the main
-    process (it would break Google ADC discovery), so it is applied only here, to
-    the subprocess env.
+    process, so it is applied only here, to the subprocess env.
     """
     q = (
         "SELECT QualifiedApiName, Label, DataType FROM FieldDefinition "

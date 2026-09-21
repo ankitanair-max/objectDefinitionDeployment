@@ -63,6 +63,10 @@ def patch_tree(org: dict | None, overlays: dict[str, dict], obj: str) -> dict:
     fields = {}
     if org:
         for name, f in (org.get("fields") or {}).items():
+            if name == "Name":
+                # Standard Name is <nameFieldLabel> only. Salesforce rejects
+                # CustomFieldTranslation for Object.Name ("Cannot translate standard field").
+                continue
             fields[name] = dict(f)
     object_label = (org or {}).get("object_label") or ""
     name_label = (org or {}).get("name_field_label") or ""
@@ -80,9 +84,6 @@ def patch_tree(org: dict | None, overlays: dict[str, dict], obj: str) -> dict:
             starts = starts_with_for(en)
         elif e["kind"] == KIND_NAME_FIELD or e.get("key") == "Name":
             name_label = en
-            fields.setdefault("Name", {"name": "Name", "label": "", "help": "",
-                                       "relationshipLabel": "", "xml": ""})
-            fields["Name"]["label"] = en
         elif e["kind"] == KIND_OBJECT_FIELD:
             key = e["key"]
             fields.setdefault(key, {"name": key, "label": "", "help": "",
@@ -164,8 +165,13 @@ def write_object(obj: str, lang: str, model: dict, root: Path) -> int:
         '<?xml version="1.0" encoding="UTF-8"?>\n' + render_object_file(model),
         encoding="utf-8",
     )
+    name_tf = folder / "Name.fieldTranslation-meta.xml"
+    if name_tf.exists():
+        name_tf.unlink()
     n = 1
     for name, field in sorted(model["fields"].items()):
+        if name == "Name":
+            continue
         # Skip fields that would deploy with neither label nor preserved xml.
         if not field.get("label") and not field.get("xml"):
             continue

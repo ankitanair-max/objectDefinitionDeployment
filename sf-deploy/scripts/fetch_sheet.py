@@ -4,11 +4,9 @@ fetch_sheet.py — Local, GAS-free extraction of Data Dictionary object tabs
 from a Google Sheet into `temp_updates.json` (the exact shape the existing
 `generate_xml.py` generator expects).
 
-Replaces the CI-only inline `fetch_data.js`. Runs fully locally using the
-user's Google credentials:
-  1. Application Default Credentials (ADC)  — `gcloud auth application-default
-     login --scopes=...spreadsheets,drive`  (preferred, deploys as the user), OR
-  2. a service-account JSON via GOOGLE_SERVICE_ACCOUNT_JSON.
+Sheet access uses the same Google Workspace login as Claude/Cursor
+(`mcp-adaptor --server google_workspace`). Application Default Credentials
+(ADC) are not used — they 403 without a quota project.
 
 Usage:
   python scripts/fetch_sheet.py \
@@ -33,6 +31,8 @@ import sys
 import warnings
 
 warnings.filterwarnings("ignore")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sheets_ws import get_sheets_service  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # Column mapping: Row-12 API header (case-insensitive)  ->  temp_updates.json key
@@ -145,31 +145,7 @@ def find_helper_cols(header_row: list) -> dict:
     return cols
 
 
-def get_sheets_service():
-    """Build a Sheets API client from ADC or a service-account JSON."""
-    from googleapiclient.discovery import build
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets.readonly",
-        "https://www.googleapis.com/auth/drive.readonly",
-    ]
-    sa_raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
-    if sa_raw:
-        import base64
-        from google.oauth2 import service_account
-
-        if sa_raw.startswith("{"):
-            info = json.loads(sa_raw)
-        elif sa_raw.startswith("/") or sa_raw.lower().endswith(".json"):
-            info = json.load(open(sa_raw))
-        else:
-            info = json.loads(base64.b64decode(sa_raw).decode())
-        creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
-    else:
-        import google.auth
-
-        creds, _ = google.auth.default(scopes=scopes)
-    return build("sheets", "v4", credentials=creds, cache_discovery=False)
+# get_sheets_service lives in sheets_ws.py (Google Workspace MCP, not ADC).
 
 
 def norm(s) -> str:

@@ -33,8 +33,8 @@ scope for a new task without re-confirming.
 Working directory is always `sf-deploy/`.
 
 1. **Fetch** — `python scripts/fetch_sheet.py --spreadsheet-id <ID> [--tabs "<tab1,tab2>"]`
-   Produces `temp_updates.json`. Uses the user's Google ADC creds
-   (`gcloud auth application-default login --scopes=...spreadsheets,drive`).
+   Produces `temp_updates.json`. Uses Google Workspace MCP (`mcp-adaptor`),
+   the same login as Claude/Cursor — not gcloud ADC.
 2. **Validate (HARD GATE)** — `python scripts/validate_sheet.py --in temp_updates.json --json .build/validation_report.json`
    - If the report has **any ERROR**, STOP. Do not generate XML, do not build a
      package, do not deploy. Show the user the failing rows and ask them to fix
@@ -95,7 +95,7 @@ python scripts/build_object_report.py \
 - It writes a single self-contained tab named after the object (short name),
   replacing that tab if it already exists (safe to re-run). Other objects' tabs
   are left untouched.
-- Keep the MAIN process on the real `HOME` (Google ADC lives there); `--sf-home`
+- Keep the MAIN process on the real `HOME` (mcp-adaptor / keyring live there); `--sf-home`
   scopes the shim to the `sf` subprocess only. Remove the shim afterwards (it
   holds copied auth tokens).
 - Writing this LOCAL workbook is NOT a Google-Sheet write, so the sheet-write
