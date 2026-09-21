@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from translation_lib import (
+from translate_enrich import (
     KIND_NAME_FIELD,
     KIND_OBJECT_FIELD,
     KIND_OBJECT_LABEL,

@@ -180,6 +180,11 @@ def is_object_tab(title: str) -> bool:
     return title.strip().lower() not in {t.lower() for t in NON_OBJECT_TABS}
 
 
+def parse_tab_list(raw: str) -> list[str]:
+    """Split `--tabs` the same way as the rest of this repo: comma-separated titles."""
+    return [t.strip() for t in str(raw or "").split(",") if t.strip()]
+
+
 def find_header_row(grid: list[list]) -> int | None:
     """Return 0-based index of the API header row (has 'fullName' and 'type')."""
     for i, row in enumerate(grid[:20]):
@@ -310,7 +315,7 @@ def parse_object_header(grid: list[list], header_idx: int) -> dict:
         "enableHistory": eh,
         "enableSearch": es,
     })
-    from translation_lib import unpack_provenance
+    from translate_enrich import unpack_provenance
     unpack_provenance(
         meta,
         packed_key="Object Translation Provenance",
@@ -365,7 +370,7 @@ def parse_tab(title: str, grid: list[list], object_api_hint: str = "") -> list[d
                "_SheetRow": ridx + 1}
         for idx, key in col_map.items():
             rec[key] = cells[idx] if idx < len(cells) else ""
-        from translation_lib import unpack_provenance
+        from translate_enrich import unpack_provenance
         unpack_provenance(
             rec,
             packed_key="Translation Provenance",
@@ -460,7 +465,13 @@ def main() -> int:
         return 0
 
     if args.tabs.strip():
-        wanted = [t.strip() for t in args.tabs.split(",") if t.strip()]
+        wanted = parse_tab_list(args.tabs)
+        missing = [t for t in wanted if t not in all_titles]
+        if missing:
+            print(f"❌ unknown tab(s): {', '.join(missing)}")
+            obj_tabs = [t for t in all_titles if is_object_tab(t)]
+            print(f"   available object tabs: {', '.join(obj_tabs)}")
+            return 1
     else:
         wanted = [t for t in all_titles if is_object_tab(t)]
 

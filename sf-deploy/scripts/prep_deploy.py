@@ -30,12 +30,10 @@ validated, planned, deployed, and verified through THIS command. There is no
 parallel translation pipeline.
 
 Usage:
-  python scripts/prep_deploy.py --org ERPDEV01 \
-      --tabs "諸掛明細: Sales_IncidentalExpensesDetail"
+  python scripts/prep_deploy.py --org ERPDEV01 --tabs "Deal,Shipping"
 
   python scripts/prep_deploy.py --org ERPDEV01 --phase deploy \
-      --tabs "諸掛明細: Sales_IncidentalExpensesDetail" \
-      --apply-translations
+      --tabs "Deal,Shipping" --apply-translations
 """
 from __future__ import annotations
 
@@ -162,7 +160,11 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str], dict]
     print(f"  BUILD PHASE (no org writes)   org={args.org}")
     print("=" * 72)
 
-    tab_list = [t.strip() for t in args.tabs.split(",") if t.strip()]
+    sys.path.insert(0, "scripts")
+    from fetch_sheet import parse_tab_list
+    tab_list = parse_tab_list(args.tabs)
+    if not tab_list:
+        raise SystemExit("❌ --tabs is required (comma-separated, e.g. Deal,Shipping).")
 
     # 1) fetch all target tabs together
     print("\n[1/8] fetch sheet tabs (selected --tabs only)")
@@ -172,12 +174,11 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str], dict]
 
     # 2) automatic translation enrichment (DeepL or Google — one provider/batch)
     print("\n[2/8] translation enrichment (JA → en_US)")
-    sys.path.insert(0, "scripts")
     from translate_enrich import (
         NEEDS_CONFIRMATION, TranslationAbort, merge_into_rows, preview, run_enrichment,
+        org_id_from_display, plan_has_members, save_sync_state,
+        build_plan, snapshot_translations, write_plan,
     )
-    from translation_lib import org_id_from_display, plan_has_members, save_sync_state
-    from translation_plan import build_plan, snapshot_translations, write_plan
 
     rows = json.loads(temp_path.read_text(encoding="utf-8"))
     fail_hook = bool(args.fail_deepl_after_preflight or
@@ -353,7 +354,7 @@ def deploy_phase(args, temp_path: Path, objs: list[str], tab_of: dict[str, str],
         return 0
 
     sys.path.insert(0, "scripts")
-    from translation_lib import save_sync_state
+    from translate_enrich import save_sync_state
 
     # REAL deploy of the single batch package
     print("\n[1/3] real deploy (sf project deploy start)")
@@ -414,7 +415,8 @@ def deploy_phase(args, temp_path: Path, objs: list[str], tab_of: dict[str, str],
 def main() -> int:
     ap = argparse.ArgumentParser(description="Gated batch Sheet->org deploy orchestrator")
     ap.add_argument("--org", required=True, help="target org alias/username")
-    ap.add_argument("--tabs", required=True, help="comma-separated object tab names")
+    ap.add_argument("--tabs", required=True,
+                    help="comma-separated object tab names (e.g. Deal,Shipping)")
     ap.add_argument("--phase", choices=["build", "deploy"], default="build")
     ap.add_argument("--test-level", default="NoTestRun")
     ap.add_argument("--sheet-id", default=DEFAULT_SHEET_ID)

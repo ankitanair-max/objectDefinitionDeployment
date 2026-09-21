@@ -100,7 +100,7 @@ def org_fields(obj: str, org: str) -> set[str]:
 def org_translation_labels(obj: str, org: str, lang: str = "en_US") -> dict:
     """Live CustomObjectTranslation labels for exact-English verification."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from translation_lib import jsonable_translation, load_token, parse_object_translation_el, read_metadata
+    from translate_enrich import jsonable_translation, load_token, parse_object_translation_el, read_metadata
     tokinfo = load_token(org)
     recs = read_metadata(
         "CustomObjectTranslation", [f"{obj}-{lang}"],

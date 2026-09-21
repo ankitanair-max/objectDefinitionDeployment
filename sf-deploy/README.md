@@ -47,7 +47,7 @@ cd "sf-deploy"
 python scripts/fetch_sheet.py --spreadsheet-id <SHEET_ID> --list-tabs
 
 # 1–4: fetch + validate (gate) + generate + package  (scope = --tabs)
-python scripts/run.py --spreadsheet-id <SHEET_ID> --tabs "輸入・入庫管理明細"
+python scripts/run.py --spreadsheet-id <SHEET_ID> --tabs "輸入・入庫管理明細,成約"
 #   (run.py refuses to run without --tabs unless you pass --all-tabs)
 
 # ORG-SELECTION GATE: always pick the target from the connected orgs
@@ -70,11 +70,11 @@ the org. There is no parallel translation command.
 ```bash
 cd sf-deploy
 
-# Preview translation writes (no sheet write, no org write)
-python scripts/prep_deploy.py --org "ERPDEV01" --tabs "Deal"
+# Preview (one tab or many — comma-separated, same as fetch_sheet / run.py)
+python scripts/prep_deploy.py --org "ERPDEV01" --tabs "Deal,Shipping"
 
 # After confirming the printed cell: old → new batch:
-python scripts/prep_deploy.py --org "ERPDEV01" --tabs "Deal" \
+python scripts/prep_deploy.py --org "ERPDEV01" --tabs "Deal,Shipping" \
     --apply-translations --phase deploy
 ```
 

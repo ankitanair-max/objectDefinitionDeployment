@@ -1,6 +1,6 @@
 ---
 description: Automatic JA→en_US object/field label translation runs inside prep_deploy.py (Translation Workbench). Never a parallel command.
-globs: sf-deploy/scripts/{prep_deploy,translate_enrich,translation_lib,translation_plan,generate_object_translation,mcp_deepl,mcp_client,fetch_sheet,write_back,validate_sheet,build_manifest,verify_deploy}.py
+globs: sf-deploy/scripts/{prep_deploy,translate_enrich,generate_object_translation,mcp_deepl,mcp_client,fetch_sheet,write_back,validate_sheet,build_manifest,verify_deploy}.py
 alwaysApply: false
 ---
 
@@ -12,7 +12,7 @@ orchestrator. Provenance is also stamped on standard field rows (OwnerId,
 CreatedDate, …). There is no second translation command.
 
 ```
-python scripts/prep_deploy.py --org "<ORG>" --tabs "<TABS>" --phase deploy \
+python scripts/prep_deploy.py --org "<ORG>" --tabs "<tab1>,<tab2>" --phase deploy \
     --apply-translations
 ```
 

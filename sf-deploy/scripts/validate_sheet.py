@@ -78,10 +78,10 @@ BOOLEANISH = TRUTHY | {"false", "n", "no", "0", "×", "-", ""}
 def _validate_translation(rep: Report, obj: str, loc: str, ja: str, en: str, *, kind: str) -> None:
     """Hard-block blank/invalid English. Never warn-and-continue for in-scope labels."""
     try:
-        from translation_lib import invalid_english, norm as _n
+        from translate_enrich import invalid_english, norm as _n
     except ImportError:
         sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
-        from translation_lib import invalid_english, norm as _n
+        from translate_enrich import invalid_english, norm as _n
     ja_n, en_n = _n(ja), _n(en)
     if not ja_n:
         # object/name JA blank is already covered by sheet structure; field.label covers fields.
