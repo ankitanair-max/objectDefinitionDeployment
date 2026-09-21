@@ -75,6 +75,28 @@ TRUTHY = {"true", "y", "yes", "1", "○", "〇"}
 BOOLEANISH = TRUTHY | {"false", "n", "no", "0", "×", "-", ""}
 
 
+def _validate_translation(rep: Report, obj: str, loc: str, ja: str, en: str, *, kind: str) -> None:
+    """Hard-block blank/invalid English. Never warn-and-continue for in-scope labels."""
+    try:
+        from translation_lib import invalid_english, norm as _n
+    except ImportError:
+        sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
+        from translation_lib import invalid_english, norm as _n
+    ja_n, en_n = _n(ja), _n(en)
+    if not ja_n:
+        # object/name JA blank is already covered by sheet structure; field.label covers fields.
+        if kind != "field":
+            rep.error(obj, loc, "translation.ja", f"{kind} Japanese source label is blank")
+        return
+    if not en_n:
+        rep.error(obj, loc, "translation.en",
+                  f"{kind} English label is blank — cannot deploy without en_US")
+        return
+    reason = invalid_english(en_n, ja=ja_n, api=loc if loc != "-" else obj)
+    if reason:
+        rep.error(obj, loc, "translation.en", f"{kind} English is invalid: {reason}")
+
+
 def truthy(v) -> bool:
     return str(v or "").strip().lower() in TRUTHY
 
@@ -128,6 +150,10 @@ def validate(rows: list[dict], rep: Report, org_objects: set[str] | None = None)
                 rep.error(r.get("Object Label", "?"), "-", "object.api", "Object API Name is blank")
             elif not (API_NAME_RE.match(obj) and obj.endswith("__c")):
                 rep.error(obj, "-", "object.api", f"Object API '{obj}' invalid (must match API name regex and end __c)")
+            _validate_translation(rep, obj, "-", r.get("Object Label", ""),
+                                  r.get("Object Label (EN)", ""), kind="object")
+            _validate_translation(rep, obj, "Name", r.get("Name Field Label", ""),
+                                  r.get("Name Field Label (EN)", ""), kind="name")
             continue
 
         obj = r.get("Object API Name", "").strip() or r.get("_SheetName", "").strip()
@@ -155,6 +181,9 @@ def validate(rows: list[dict], rep: Report, org_objects: set[str] | None = None)
             seen[(obj, fapi)] += 1
             if seen[(obj, fapi)] == 2:
                 rep.error(obj, fapi, "field.duplicate", f"Duplicate field API '{fapi}' in object '{obj}'")
+
+        if fapi.endswith("__c"):
+            _validate_translation(rep, obj, fapi, label, r.get("Field Label (EN)", ""), kind="field")
 
         # Standard fields (no __c) are never deployed by generate_xml, so their
         # field-definition columns (Length, referenceTo, Precision, etc.) are

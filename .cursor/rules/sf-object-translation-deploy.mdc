@@ -1,0 +1,64 @@
+---
+description: Automatic JA→en_US object/field label translation runs inside prep_deploy.py (Translation Workbench). Never a parallel command.
+globs: sf-deploy/scripts/{prep_deploy,translate_enrich,translation_lib,translation_plan,generate_object_translation,mcp_*.py,fetch_sheet,validate_sheet,build_manifest,verify_deploy}.py
+alwaysApply: false
+---
+
+# Object/field label translation (inside the canonical deploy command)
+
+English labels for custom objects, the standard Name field, and custom fields
+are produced, validated, planned, deployed, and verified through the existing
+orchestrator. There is no second translation command and no directory-scan
+manifest for translation scope.
+
+```
+python scripts/prep_deploy.py --org "<ORG>" --tabs "<TABS>" --phase deploy \
+    --apply-translations
+```
+
+`--apply-translations` is the gated sheet write of the translation batch
+(preview first, then confirm). It is not a second pipeline.
+
+## Flow (inserted into prep_deploy, not a fork)
+
+1. Live fetch of **selected `--tabs` only**.
+2. Structural pre-validation + collect labels that need English.
+3. Provider preflight: DeepL MCP if healthy, else Google Sheets `GOOGLETRANSLATE`.
+   One provider per batch; never mix. DeepL failure after preflight is fatal
+   (no Google fallback, no partial write).
+4. Terminology: API-name match → standard field map → unique JA→EN on the
+   selected tabs → provider.
+5. One confirmation for the complete sheet-write batch (headers, EN, provenance).
+6. Stale-check immediately before write. Recalc + read calculated Google values.
+7. Existing `validate_sheet.py` **plus** translation ERRORs (blank/invalid EN
+   never degrades to WARN).
+8. Fresh org snapshot (Tooling fields + CustomObjectTranslation).
+9. Immutable plan → schema XML + patched COT XML (org tree preserved).
+10. Manifest **from the plan**. Check-only, then real deploy, then live exact-EN verify.
+11. Sync state (org Id) only after verification succeeds.
+
+## Sheet columns (header-driven)
+
+- `Field Label (EN)`
+- `Translation Origin` (`manual` / `inventory` / `deepl` / `google`)
+- `Translation Source Hash` (normalized JA SHA-256)
+- `Translation Generated At`
+
+Missing headers occupy spare `FreeColumnGDC*` cells after confirmation.
+Japanese source changes (hash mismatch) replace previous English, including
+former `manual` values. Unchanged JA is never retranslated because DeepL later
+became available.
+
+## Out of initial scope
+
+Picklist values, relationship labels, help text, LWC/Flow/Custom Labels, layouts,
+record types.
+
+## Must not
+
+- Write English into Japanese `CustomField.label`.
+- Deploy blank translations.
+- Use API name / JA source / placeholder / formula text as English.
+- Scan or modify tabs that were not selected.
+- Require a GCP project, gcloud, Cloud Translation API, or a service account.
+- Use Cursor/Claude/another LLM to generate translations.

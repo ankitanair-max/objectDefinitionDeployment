@@ -97,12 +97,62 @@ def org_fields(obj: str, org: str) -> set[str]:
     return {f"{r['DeveloperName']}__c" for r in recs}
 
 
+def org_translation_labels(obj: str, org: str, lang: str = "en_US") -> dict:
+    """Live CustomObjectTranslation labels for exact-English verification."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from translation_lib import jsonable_translation, load_token, parse_object_translation_el, read_metadata
+    tokinfo = load_token(org)
+    recs = read_metadata(
+        "CustomObjectTranslation", [f"{obj}-{lang}"],
+        tokinfo["accessToken"], tokinfo["instanceUrl"].rstrip("/"), tokinfo["apiVersion"])
+    if not recs:
+        return {}
+    model = jsonable_translation(parse_object_translation_el(recs[0], obj, lang))
+    labels = {"__object__": model.get("object_label") or "", "Name": model.get("name_field_label") or ""}
+    for name, f in (model.get("fields") or {}).items():
+        labels[name] = f.get("label") or ""
+    return labels
+
+
+def verify_translations(plan: dict, org: str) -> bool:
+    ok = True
+    packaged = [t for t in (plan.get("translations") or []) if t.get("package")]
+    if not packaged:
+        print("      (no packaged translations to verify)")
+        return True
+    by_obj: dict[str, list] = {}
+    for t in packaged:
+        by_obj.setdefault(t["component"], []).append(t)
+    for obj, entries in by_obj.items():
+        live = org_translation_labels(obj, org, plan.get("language") or "en_US")
+        print(f"\n  [EN] {obj}")
+        for t in entries:
+            expected = (t.get("translation") or "").strip()
+            if t["kind"] == "ObjectLabel":
+                actual = live.get("__object__") or ""
+                loc = "object label"
+            elif t["kind"] == "NameField" or t.get("key") == "Name":
+                actual = live.get("Name") or ""
+                loc = "Name"
+            else:
+                actual = live.get(t["key"]) or ""
+                loc = t["key"]
+            if actual != expected:
+                ok = False
+                print(f"      ✗ {loc}: org {actual!r} != sheet {expected!r}")
+            else:
+                print(f"      ✓ {loc}: {expected!r}")
+    return ok
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Live post-deploy verification")
     ap.add_argument("--target-org", required=True)
     ap.add_argument("--source-root", default="force-app/main/default")
     ap.add_argument("--objects", default="", help="comma-separated <Obj>__c to verify")
     ap.add_argument("--all", action="store_true", help="verify every generated object")
+    ap.add_argument("--plan", default="", help="deploy plan JSON (exact English verification)")
+    ap.add_argument("--org-snapshot", default="")
     args = ap.parse_args()
 
     only = {o.strip() for o in args.objects.split(",") if o.strip()} or None
@@ -132,6 +182,15 @@ def main() -> int:
         print(f"      fields expected: {len(fields)}  |  present: {len([f for f in fields if f in present])}  |  missing: {len(missing)}")
         for m in missing:
             print(f"        ✗ MISSING field: {m}")
+
+    trans_ok = True
+    if args.plan:
+        plan_path = Path(args.plan)
+        if plan_path.exists():
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            trans_ok = verify_translations(plan, args.target_org)
+            if not trans_ok:
+                overall_ok = False
 
     print("\n" + "=" * 72)
     print(f"  RESULT: {'ALL CONFIRMED IN ORG' if overall_ok else 'VERIFICATION FAILED — deploy did NOT fully land'}")

@@ -41,6 +41,7 @@ import xml.sax.saxutils as sx
 TYPE_ORDER = [
     "CustomObject",
     "CustomField",
+    "CustomObjectTranslation",
     "RecordType",
     "Layout",
     "FlexiPage",
@@ -79,6 +80,17 @@ def discover(source_root: Path, only: set[str] | None) -> dict[str, list[str]]:
             if rt_dir.is_dir():
                 for f in sorted(rt_dir.glob("*.recordType-meta.xml")):
                     members["RecordType"].add(f"{obj}.{f.name[:-len('.recordType-meta.xml')]}")
+
+    translations_dir = source_root / "objectTranslations"
+    if translations_dir.is_dir():
+        for folder in sorted(p for p in translations_dir.iterdir() if p.is_dir()):
+            # folder name is <Obj>__c-<lang>
+            name = folder.name
+            obj = name.rsplit("-", 1)[0] if "-" in name else name
+            if only and obj not in only:
+                continue
+            if any(folder.glob("*.objectTranslation-meta.xml")):
+                members["CustomObjectTranslation"].add(name)
 
     simple = {
         "Layout": ("layouts", ".layout-meta.xml"),
@@ -151,6 +163,9 @@ def main() -> int:
     ap.add_argument("--out", default="manifest/package.xml")
     ap.add_argument("--api-version", default="")
     ap.add_argument("--only", default="", help="comma-separated object API names to restrict to")
+    ap.add_argument("--plan", default="",
+                    help="immutable deploy plan JSON — manifest members come FROM the plan, "
+                         "not from a directory scan")
     ap.add_argument("--destroy", default="", help="deletions.json path")
     ap.add_argument("--destroy-out", default="manifest/destructiveChanges.xml")
     ap.add_argument("--project-root", default=".")
@@ -160,6 +175,21 @@ def main() -> int:
     api_version = args.api_version or default_api_version(proj_root)
     source_root = Path(args.source_root)
     only = {o.strip() for o in args.only.split(",") if o.strip()} or None
+
+    if args.plan:
+        plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
+        members = {k: list(v) for k, v in (plan.get("members") or {}).items() if v}
+        total = sum(len(v) for v in members.values())
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(render_package(members, api_version), encoding="utf-8")
+        print(f"📦 package.xml  ->  {out}   (api {api_version}, FROM PLAN)")
+        for mtype in TYPE_ORDER:
+            if members.get(mtype):
+                print(f"     {mtype:24} {len(members[mtype])}")
+        if total == 0:
+            print("   ℹ️  empty plan — no members (no-op).")
+        return 0
 
     if not source_root.is_dir():
         print(f"❌ source root '{source_root}' not found — run the generators first.")

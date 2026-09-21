@@ -40,6 +40,10 @@ warnings.filterwarnings("ignore")
 # --------------------------------------------------------------------------- #
 API_HEADER_TO_KEY = {
     "label": "Field Label",
+    "field label (en)": "Field Label (EN)",
+    "translation origin": "Translation Origin",
+    "translation source hash": "Translation Source Hash",
+    "translation generated at": "Translation Generated At",
     "fullname": "Field API Name",
     "type": "Data Type",
     "length": "Length",
@@ -219,6 +223,15 @@ def build_col_map(header_row: list, jp_header_row: list | None = None) -> dict[i
         if "デフォルト" in jph:                    # デフォルト値  (col L)
             col_map[idx] = "Default Value"
             continue
+        # English label / provenance (header-driven; JP or EN header text).
+        jph_l = jph.lower()
+        if ("ラベル" in jph and "(en)" in jph_l) or "項目ラベル名 (en)" in jph_l:
+            col_map[idx] = "Field Label (EN)"
+            continue
+        if h in ("field label (en)", "translation origin",
+                 "translation source hash", "translation generated at"):
+            col_map[idx] = API_HEADER_TO_KEY[h]
+            continue
         # 2) The 'displayFormat/referenceTo/formula/valueSet' header sits on the
         #    DESCRIPTION column (col G) in this sheet — do NOT read it as the
         #    value (client's real value is col H, handled above).
@@ -242,7 +255,15 @@ def parse_object_header(grid: list[list], header_idx: int) -> dict:
         cells = [norm(c) for c in row]
         joined = [c for c in cells]
         for j, c in enumerate(cells):
-            if c == "表示ラベル":
+            if c in ("表示ラベル (EN)", "表示ラベル(EN)", "Object Label (EN)"):
+                meta["Object Label (EN)"] = _first_nonblank(joined, j + 1)
+            elif c in ("Object Translation Origin",):
+                meta["Object Translation Origin"] = _first_nonblank(joined, j + 1)
+            elif c in ("Object Translation Source Hash",):
+                meta["Object Translation Source Hash"] = _first_nonblank(joined, j + 1)
+            elif c in ("Object Translation Generated At",):
+                meta["Object Translation Generated At"] = _first_nonblank(joined, j + 1)
+            elif c == "表示ラベル":
                 label = _first_nonblank(joined, j + 1)
                 # オブジェクト名 label is usually further right on the same row
                 if "オブジェクト名" in cells:
@@ -319,13 +340,14 @@ def parse_tab(title: str, grid: list[list], object_api_hint: str = "") -> list[d
         idx = helper[key]
         return cells[idx].strip() if idx < len(cells) else ""
 
-    for row in grid[header_idx + 1:]:
+    for ridx, row in enumerate(grid[header_idx + 1:], start=header_idx + 1):
         cells = [norm(c) for c in row]
         # stop at the end of the FIELD list — END[項目] (col A) or the legacy
         # gray-guard line (col C). Shared helper so the boundary never drifts.
         if is_field_list_end(cells):
             break
-        rec = {"_SheetName": title, "Object API Name": obj_api, "Object Label": obj_label}
+        rec = {"_SheetName": title, "Object API Name": obj_api, "Object Label": obj_label,
+               "_SheetRow": ridx + 1}
         for idx, key in col_map.items():
             rec[key] = cells[idx] if idx < len(cells) else ""
         # capture page-layout Tab (Z) + section (AA) for downstream page work
@@ -348,8 +370,12 @@ def parse_tab(title: str, grid: list[list], object_api_hint: str = "") -> list[d
         if norm(rec.get("Field API Name")) == "Name":
             name_field = {
                 "Name Field Label": rec.get("Field Label", ""),
+                "Name Field Label (EN)": rec.get("Field Label (EN)", ""),
                 "Name Field Type": rec.get("Data Type", ""),
                 "Name Field Display Format": rec.get("Type Specific Value", ""),
+                "Name Translation Origin": rec.get("Translation Origin", ""),
+                "Name Translation Source Hash": rec.get("Translation Source Hash", ""),
+                "Name Translation Generated At": rec.get("Translation Generated At", ""),
             }
             continue
         field_rows.append(rec)

@@ -453,6 +453,7 @@ def build_field_xml(row: dict) -> ET.Element | None:
     field_api = row.get("Field API Name", "").strip()
     raw_type = row.get("Data Type", "").strip()
     label = (row.get("Field Label") or row.get("Field Label (JA)") or "").strip()
+    # Field Label (EN) is Translation Workbench only — never the Japanese master.
     type_specific = str(row.get("Type Specific Value") or "").strip()
 
     sf_type, is_formula = normalize_type(raw_type)
