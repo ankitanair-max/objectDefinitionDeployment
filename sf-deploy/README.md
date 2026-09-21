@@ -84,9 +84,9 @@ Provider order (one provider per batch):
 2. Otherwise Google Sheets `=GOOGLETRANSLATE(...)` formulas; calculated values
    (not the formula text) are validated and deployed.
 
-Sheet I/O uses the Cursor/Claude Google Workspace MCP session that is already
-authenticated. There is no extra MCP sheet adapter, no GCP quota project, and
-no `gcloud` Application Default Credentials step.
+Sheet I/O is the existing `fetch_sheet.py` / `write_back.py` Google Sheets API
+client (ADC), the same path every other gated write in this repo uses. There is
+no extra sheet adapter.
 
 Optional DeepL MCP: set `MCP_DEEPL_COMMAND` / `MCP_DEEPL_SERVER` / `MCP_DEEPL_URL`.
 Google Translate formulas still run in the sheet when DeepL is not configured.

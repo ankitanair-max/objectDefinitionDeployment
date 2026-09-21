@@ -15,12 +15,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from mcp_deepl import DeepLProvider, DeepLTranslateError, DeepLUnavailable
-from sheet_client import SheetClient
+from write_back import get_write_service
 from translation_lib import (
     FIELD_EN_HEADER,
     KIND_NAME_FIELD,
@@ -52,6 +53,7 @@ from translation_lib import (
     is_delete,
     now_iso,
     norm,
+    parse_a1,
     parse_provenance,
     plan_missing_headers,
     truthy,
@@ -96,6 +98,50 @@ class Enrichment:
 
 class TranslationAbort(SystemExit):
     """Hard stop: no sheet write, no deploy."""
+
+
+def _read_tab(svc, sid: str, tab: str) -> list[list[str]]:
+    """Live tab read — same call as write_back.py / write_attr_fixes.py."""
+    vals = svc.spreadsheets().values().get(
+        spreadsheetId=sid, range=f"'{tab}'",
+        valueRenderOption="FORMATTED_VALUE",
+    ).execute().get("values", []) or []
+    return [[str(c) if c is not None else "" for c in row] for row in vals]
+
+
+def _batch_update(svc, sid: str, data: list[dict], option: str) -> None:
+    """Live tab write — same call as write_back.py / writeback_cells.py."""
+    if not data:
+        return
+    svc.spreadsheets().values().batchUpdate(
+        spreadsheetId=sid,
+        body={"valueInputOption": option, "data": data},
+    ).execute()
+
+
+def _cells_from_grid(grid: list[list[str]], a1_cells: list[str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for cell in a1_cells:
+        col, row = parse_a1(cell)
+        out[cell] = cell_at(grid, row - 1, col)
+    return out
+
+
+def _wait_recalc(svc, sid: str, tab: str, a1_cells: list[str],
+                 timeout: float = 45.0, interval: float = 1.5) -> dict[str, str]:
+    deadline = time.time() + timeout
+    last: dict[str, str] = {}
+    while True:
+        last = _cells_from_grid(_read_tab(svc, sid, tab), a1_cells)
+        if all(not (v.startswith("=") or v == "Loading...") for v in last.values()):
+            return last
+        if time.time() >= deadline:
+            stuck = {k: v for k, v in last.items() if v.startswith("=") or v == "Loading..."}
+            raise RuntimeError(
+                "Spreadsheet recalculation timed out; calculated English "
+                f"could not be read for: {stuck}"
+            )
+        time.sleep(interval)
 
 
 def _cell(grid, r0, c) -> str:
@@ -551,7 +597,7 @@ def PROVIDER_DISPLAY(p: str) -> str:
     return "EN-US (DeepL literals)" if p == ORIGIN_DEEPL else "en (GOOGLETRANSLATE formula → read calculated)"
 
 
-def snapshot_cells(sheet: SheetClient, sid: str, writes: list[CellWrite]) -> dict[str, str]:
+def snapshot_cells(svc, sid: str, writes: list[CellWrite]) -> dict[str, str]:
     by_tab: dict[str, list[str]] = {}
     for w in writes:
         # range is 'Tab'!A1
@@ -562,7 +608,7 @@ def snapshot_cells(sheet: SheetClient, sid: str, writes: list[CellWrite]) -> dic
         by_tab.setdefault(tab, []).append(cell)
     out: dict[str, str] = {}
     for tab, cells in by_tab.items():
-        got = sheet.read_cells(sid, tab, cells)
+        got = _cells_from_grid(_read_tab(svc, sid, tab), cells)
         for c, v in got.items():
             out[_q(tab, c)] = v
     return out
@@ -577,23 +623,23 @@ def stale_against(writes: list[CellWrite], live: dict[str, str]) -> list[str]:
     return problems
 
 
-def apply_writes(sheet: SheetClient, sid: str, writes: list[CellWrite]) -> None:
+def apply_writes(svc, sid: str, writes: list[CellWrite]) -> None:
     formulas = [w for w in writes if w.mode == "USER_ENTERED"]
     literals = [w for w in writes if w.mode != "USER_ENTERED"]
     if literals:
-        sheet.write_literals(sid, [{"range": w.range, "values": [[w.new]]} for w in literals])
+        _batch_update(svc, sid, [{"range": w.range, "values": [[w.new]]} for w in literals], "RAW")
     if formulas:
-        sheet.write_formulas(sid, [{"range": w.range, "values": [[w.new]]} for w in formulas])
+        _batch_update(svc, sid, [{"range": w.range, "values": [[w.new]]} for w in formulas], "USER_ENTERED")
 
 
-def read_calculated(sheet: SheetClient, sid: str, jobs: list[dict]) -> None:
+def read_calculated(svc, sid: str, jobs: list[dict]) -> None:
     formula_jobs = [j for j in jobs if j.get("formula") and j.get("en_a1") and j.get("action") == "translate"]
     by_tab: dict[str, list[dict]] = {}
     for j in formula_jobs:
         by_tab.setdefault(j["tab"], []).append(j)
     for tab, group in by_tab.items():
         cells = [j["en_a1"] for j in group]
-        values = sheet.wait_recalc(sid, tab, cells)
+        values = _wait_recalc(svc, sid, tab, cells)
         for j in group:
             calc = values.get(j["en_a1"], "")
             reason = invalid_english(calc, ja=j.get("ja", ""), api=j.get("field_api", ""))
@@ -640,12 +686,12 @@ def run_enrichment(
     spreadsheet_id: str,
     tabs: list[str],
     rows: list[dict],
-    sheet: SheetClient,
     apply: bool = False,
     force_provider: str = "",
     fail_after_preflight: bool = False,
     deepl_factory: Callable[[], DeepLProvider] | None = None,
     grids: dict[str, list[list[str]]] | None = None,
+    svc=None,
 ) -> Enrichment:
     from fetch_sheet import parse_tab
 
@@ -655,7 +701,9 @@ def run_enrichment(
     for tab in tabs:
         grid = (grids or {}).get(tab) if grids else None
         if grid is None:
-            grid = sheet.read_grid(spreadsheet_id, tab)
+            if svc is None:
+                svc = get_write_service()
+            grid = _read_tab(svc, spreadsheet_id, tab)
         parsed, loc = collect_tab(tab, grid, parse_tab_fn=parse_tab)
         parsed_all.extend(parsed)
         locs.append(loc)
@@ -728,7 +776,9 @@ def run_enrichment(
         return enr
 
     if writes:
-        live = snapshot_cells(sheet, spreadsheet_id, writes)
+        if svc is None:
+            svc = get_write_service()
+        live = snapshot_cells(svc, spreadsheet_id, writes)
         problems = stale_against(writes, live)
         if problems:
             enr.stale = True
@@ -737,10 +787,10 @@ def run_enrichment(
                 + "\n".join(f"  {p}" for p in problems[:20])
                 + "\nRe-run to build a fresh preview."
             )
-        apply_writes(sheet, spreadsheet_id, writes)
+        apply_writes(svc, spreadsheet_id, writes)
         enr.applied = True
         if any(j.get("formula") for j in jobs):
-            read_calculated(sheet, spreadsheet_id, jobs)
+            read_calculated(svc, spreadsheet_id, jobs)
     enr.rows_patch = jobs
     return enr
 
@@ -756,19 +806,17 @@ def main() -> int:
     args = ap.parse_args()
     tabs = [t.strip() for t in args.tabs.split(",") if t.strip()]
     rows = json.loads(Path(args.rows).read_text(encoding="utf-8")) if Path(args.rows).exists() else []
-    with SheetClient() as sheet:
-        try:
-            enr = run_enrichment(
-                spreadsheet_id=args.spreadsheet_id,
-                tabs=tabs,
-                rows=rows,
-                sheet=sheet,
-                apply=args.apply,
-                force_provider=args.force_provider,
-            )
-        except TranslationAbort as e:
-            print(e)
-            return 1
+    try:
+        enr = run_enrichment(
+            spreadsheet_id=args.spreadsheet_id,
+            tabs=tabs,
+            rows=rows,
+            apply=args.apply,
+            force_provider=args.force_provider,
+        )
+    except TranslationAbort as e:
+        print(e)
+        return 1
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     payload = asdict(enr)
     payload["writes"] = [asdict(w) for w in enr.writes]

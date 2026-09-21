@@ -1,6 +1,6 @@
 ---
 description: Automatic JA→en_US object/field label translation runs inside prep_deploy.py (Translation Workbench). Never a parallel command.
-globs: sf-deploy/scripts/{prep_deploy,translate_enrich,translation_lib,translation_plan,generate_object_translation,sheet_client,mcp_*.py,fetch_sheet,validate_sheet,build_manifest,verify_deploy}.py
+globs: sf-deploy/scripts/{prep_deploy,translate_enrich,translation_lib,translation_plan,generate_object_translation,mcp_deepl,mcp_client,fetch_sheet,write_back,validate_sheet,build_manifest,verify_deploy}.py
 alwaysApply: false
 ---
 
@@ -62,9 +62,9 @@ record types.
 - Deploy blank translations.
 - Use API name / JA source / placeholder / formula text as English.
 - Scan or modify tabs that were not selected.
-- Add a Google Workspace MCP sheet adapter or require a GCP quota project —
-  sheet I/O uses the Cursor/Claude Google Workspace MCP session that is
-  already authenticated.
+- Add a Google Workspace MCP sheet adapter — sheet I/O is the existing
+  `fetch_sheet.py` / `write_back.py` Google Sheets API client (same as every
+  other gated write in this repo).
 - Call Cloud Translation API, a service-account JSON, or an LLM to generate
   English labels.
 - Use Cursor/Claude/another LLM to generate translations.

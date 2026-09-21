@@ -173,7 +173,6 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str], dict]
     # 2) automatic translation enrichment (DeepL or Google — one provider/batch)
     print("\n[2/8] translation enrichment (JA → en_US)")
     sys.path.insert(0, "scripts")
-    from sheet_client import SheetClient
     from translate_enrich import (
         NEEDS_CONFIRMATION, TranslationAbort, merge_into_rows, preview, run_enrichment,
     )
@@ -184,16 +183,14 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str], dict]
     fail_hook = bool(args.fail_deepl_after_preflight or
                      os.environ.get("SF_FAIL_DEEPL_AFTER_PREFLIGHT"))
     try:
-        with SheetClient() as sheet:
-            enr = run_enrichment(
-                spreadsheet_id=args.sheet_id,
-                tabs=tab_list,
-                rows=rows,
-                sheet=sheet,
-                apply=bool(args.apply_translations),
-                force_provider=args.force_provider,
-                fail_after_preflight=fail_hook,
-            )
+        enr = run_enrichment(
+            spreadsheet_id=args.sheet_id,
+            tabs=tab_list,
+            rows=rows,
+            apply=bool(args.apply_translations),
+            force_provider=args.force_provider,
+            fail_after_preflight=fail_hook,
+        )
     except TranslationAbort as e:
         print(e)
         raise SystemExit(1) from e
