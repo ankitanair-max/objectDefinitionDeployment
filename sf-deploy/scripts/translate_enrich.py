@@ -698,13 +698,15 @@ def entries_from_rows(rows: list[dict], lang: str = SF_LANG) -> list[dict]:
             continue
         src = f"object_tab:{r.get('_SheetName') or obj}"
         if r.get("_type") == "object_meta":
-            out.append(make_entry(
-                kind=KIND_OBJECT_LABEL, component=obj, key=obj, language=lang,
-                master=norm(r.get("Object Label")),
-                translation=norm(r.get("Object Label (EN)")),
-                source=src, origin=norm(r.get("Object Translation Origin")),
-                source_hash=norm(r.get("Object Translation Source Hash")),
-            ))
+            obj_en = norm(r.get("Object Label (EN)"))
+            if obj_en:
+                out.append(make_entry(
+                    kind=KIND_OBJECT_LABEL, component=obj, key=obj, language=lang,
+                    master=norm(r.get("Object Label")),
+                    translation=obj_en,
+                    source=src, origin=norm(r.get("Object Translation Origin")),
+                    source_hash=norm(r.get("Object Translation Source Hash")),
+                ))
             out.append(make_entry(
                 kind=KIND_NAME_FIELD, component=obj, key="Name", language=lang,
                 master=norm(r.get("Name Field Label")),
@@ -1047,14 +1049,18 @@ def collect_tab(
     if prov_col is None:
         prov_col = missing.get(PROVENANCE_HEADER)
 
+    # Object-meta sits above the JP field-header row (hidx-1) and the EN
+    # field-header row (hidx). Searching through hidx matches 翻訳出典 on the
+    # field header and parks object provenance in AL9.
+    meta_limit = max(hidx - 1, 0)
     obj_en, obj_en_r, obj_en_c = _find_meta_value(
-        grid, hidx, OBJECT_EN_LABEL, "表示ラベル (EN)", "表示ラベル(EN)")
+        grid, meta_limit, OBJECT_EN_LABEL, "表示ラベル (EN)", "表示ラベル(EN)")
     obj_pv, obj_pv_r, obj_pv_c = _find_meta_value(
-        grid, hidx, OBJECT_PROVENANCE_LABEL, "翻訳出典")
-    obj_or, obj_or_r, obj_or_c = _find_meta_value(grid, hidx, OBJECT_ORIGIN_LABEL)
-    obj_hs, obj_hs_r, obj_hs_c = _find_meta_value(grid, hidx, OBJECT_HASH_LABEL)
-    obj_gn, obj_gn_r, obj_gn_c = _find_meta_value(grid, hidx, OBJECT_GENERATED_LABEL)
-    obj_ja, obj_ja_r, obj_ja_c = _find_meta_value(grid, hidx, "表示ラベル")
+        grid, meta_limit, OBJECT_PROVENANCE_LABEL)
+    obj_or, obj_or_r, obj_or_c = _find_meta_value(grid, meta_limit, OBJECT_ORIGIN_LABEL)
+    obj_hs, obj_hs_r, obj_hs_c = _find_meta_value(grid, meta_limit, OBJECT_HASH_LABEL)
+    obj_gn, obj_gn_r, obj_gn_c = _find_meta_value(grid, meta_limit, OBJECT_GENERATED_LABEL)
+    obj_ja, obj_ja_r, obj_ja_c = _find_meta_value(grid, meta_limit, "表示ラベル")
     pv_o, pv_h, pv_t = parse_provenance(obj_pv)
     obj_or = pv_o or obj_or
     obj_hs = pv_h or obj_hs
@@ -1191,31 +1197,33 @@ def build_jobs(locs: list[dict], object_rows: list[dict]) -> list[dict]:
                 f"(comma-separated, e.g. Deal,Shipping)."
             )
         obj = norm(meta.get("Object API Name"))
-        # object label
+        # Object EN only from a labeled object-meta cell (表示ラベル (EN) /
+        # Object Label (EN)). Never Field Label (EN) column AJ on row 1.
         ja = loc["object_ja"]["value"] or norm(meta.get("Object Label"))
-        en = loc["object_en"]["value"] or norm(meta.get("Object Label (EN)"))
-        jobs.append({
-            "kind": KIND_OBJECT_LABEL,
-            "tab": tab,
-            "object_api": obj,
-            "field_api": obj,
-            "ja": ja,
-            "en": en,
-            "origin": loc["object_origin"]["value"],
-            "source_hash": loc["object_hash"]["value"],
-            "generated_at": loc["object_generated"]["value"],
-            "ja_a1": a1(loc["object_ja"]["col0"], loc["object_ja"]["row0"] + 1)
-            if loc["object_ja"]["row0"] >= 0 and loc["object_ja"]["col0"] >= 0 else "",
-            "en_a1": a1(loc["object_en"]["col0"], loc["object_en"]["row0"] + 1)
-            if loc["object_en"]["row0"] >= 0 and loc["object_en"]["col0"] >= 0 else "",
-            "prov_a1": a1(loc["object_prov"]["col0"], loc["object_prov"]["row0"] + 1)
-            if loc["object_prov"]["row0"] >= 0 and loc["object_prov"]["col0"] >= 0 else "",
-            "origin_a1": "",
-            "hash_a1": "",
-            "gen_a1": "",
-            "wip": False,
-            "isdelete": False,
-        })
+        en = loc["object_en"]["value"] or ""
+        if loc["object_en"]["row0"] >= 0:
+            jobs.append({
+                "kind": KIND_OBJECT_LABEL,
+                "tab": tab,
+                "object_api": obj,
+                "field_api": obj,
+                "ja": ja,
+                "en": en,
+                "origin": loc["object_origin"]["value"],
+                "source_hash": loc["object_hash"]["value"],
+                "generated_at": loc["object_generated"]["value"],
+                "ja_a1": a1(loc["object_ja"]["col0"], loc["object_ja"]["row0"] + 1)
+                if loc["object_ja"]["row0"] >= 0 and loc["object_ja"]["col0"] >= 0 else "",
+                "en_a1": a1(loc["object_en"]["col0"], loc["object_en"]["row0"] + 1)
+                if loc["object_en"]["row0"] >= 0 and loc["object_en"]["col0"] >= 0 else "",
+                "prov_a1": a1(loc["object_prov"]["col0"], loc["object_prov"]["row0"] + 1)
+                if loc["object_prov"]["row0"] >= 0 and loc["object_prov"]["col0"] >= 0 else "",
+                "origin_a1": "",
+                "hash_a1": "",
+                "gen_a1": "",
+                "wip": False,
+                "isdelete": False,
+            })
         name = loc.get("name_row")
         if name and not name["wip"]:
             jobs.append({
@@ -1353,25 +1361,26 @@ def jobs_to_writes(jobs: list[dict], locs_by_tab: dict[str, dict]) -> list[CellW
         def add(cell, old, new, which):
             if not cell or new is None:
                 return
+            if (old or "") == (new or ""):
+                return
             writes.append(_write(
                 tab, cell, old, new, mode if which == "en" else "RAW",
                 j["kind"], field, obj, ja, j.get("ja_a1") or "", which,
             ))
 
         if j["kind"] == KIND_OBJECT_LABEL:
-            # Ensure object EN cell exists (may need a created header cell).
+            # No labeled object-EN cell → skip. Do not park J9/K9 or read AJ1.
             if not j.get("en_a1"):
-                slot = _ensure_object_meta_cell(loc, "object_en", OBJECT_EN_LABEL, loc["header_row"])
-                j["en_a1"] = a1(slot["col0"], slot["row0"] + 1)
-                writes.append(_write(
-                    tab, a1(max(slot["col0"] - 1, 0), slot["row0"] + 1),
-                    "", OBJECT_EN_LABEL, "RAW", j["kind"], field, obj, ja, note="header",
-                ))
+                continue
             add(j.get("en_a1"), j.get("old_en"), en_new, "en")
             old_p = format_provenance(j.get("old_origin"), j.get("old_hash"), j.get("old_generated"))
             new_p = format_provenance(j.get("origin"), j.get("source_hash"), j.get("generated_at"))
-            add(j.get("prov_a1") or _meta_a1(loc, "object_prov", OBJECT_PROVENANCE_LABEL),
-                old_p, new_p, "provenance")
+            # Do not invent an object-provenance cell (AL9). Stamp only when the
+            # object-meta block already has one.
+            prov_cell = j.get("prov_a1")
+            if not prov_cell and loc.get("object_prov", {}).get("row0", -1) >= 0:
+                prov_cell = _meta_a1(loc, "object_prov", OBJECT_PROVENANCE_LABEL)
+            add(prov_cell, old_p, new_p, "provenance")
             continue
 
         # Name + custom fields share the field-row columns.

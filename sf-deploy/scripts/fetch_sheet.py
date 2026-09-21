@@ -261,7 +261,10 @@ def parse_object_header(grid: list[list], header_idx: int) -> dict:
     meta = {"_type": "object_meta"}
     label = api = desc = ""
     er = ea = eh = es = ""
-    for row in grid[:header_idx]:
+    # Object-meta only: stop before the JP field-header row so field-column
+    # labels (翻訳出典, 項目ラベル名 (EN)) are never read as object EN/provenance.
+    meta_end = max(header_idx - 1, 0)
+    for row in grid[:meta_end]:
         cells = [norm(c) for c in row]
         joined = [c for c in cells]
         for j, c in enumerate(cells):
@@ -410,6 +413,7 @@ def parse_tab(title: str, grid: list[list], object_api_hint: str = "") -> list[d
         field_rows.append(rec)
 
     obj_meta.update(name_field)
+    obj_meta["_SheetName"] = title
     if obj_api:
         rows.append(obj_meta)
     else:

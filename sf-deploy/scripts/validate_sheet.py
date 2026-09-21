@@ -150,8 +150,12 @@ def validate(rows: list[dict], rep: Report, org_objects: set[str] | None = None)
                 rep.error(r.get("Object Label", "?"), "-", "object.api", "Object API Name is blank")
             elif not (API_NAME_RE.match(obj) and obj.endswith("__c")):
                 rep.error(obj, "-", "object.api", f"Object API '{obj}' invalid (must match API name regex and end __c)")
-            _validate_translation(rep, obj, "-", r.get("Object Label", ""),
-                                  r.get("Object Label (EN)", ""), kind="object")
+            obj_en = r.get("Object Label (EN)", "")
+            # Object EN is optional: only a labeled object-meta cell counts.
+            # Field Label (EN) / AJ1 is field-scope and must not be used here.
+            if nonblank(obj_en):
+                _validate_translation(rep, obj, "-", r.get("Object Label", ""),
+                                      obj_en, kind="object")
             _validate_translation(rep, obj, "Name", r.get("Name Field Label", ""),
                                   r.get("Name Field Label (EN)", ""), kind="name")
             continue
