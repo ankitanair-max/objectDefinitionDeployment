@@ -84,9 +84,7 @@ Provider order (one provider per batch):
 2. Otherwise Google Sheets `=GOOGLETRANSLATE(...)` formulas; calculated values
    (not the formula text) are validated and deployed.
 
-Sheet I/O is the original `fetch_sheet.py` / `write_back.py` path: Application
-Default Credentials (`gcloud auth application-default login` with Sheets/Drive
-scopes) or `GOOGLE_SERVICE_ACCOUNT_JSON`. No GCP quota project is required.
+Sheet I/O uses existing `fetch_sheet.py` / `write_back.py`.
 
 Optional DeepL MCP: set `MCP_DEEPL_COMMAND` / `MCP_DEEPL_SERVER` / `MCP_DEEPL_URL`.
 Google Translate formulas still run in the sheet when DeepL is not configured.

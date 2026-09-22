@@ -58,10 +58,8 @@ SYNC_STATE = Path(".build/translation_sync_state.json")
 
 
 # --------------------------------------------------------------------------- #
-# env helpers: sheet I/O uses ADC (`google.auth.default`) under google_env HOME.
-# Org `sf` steps use the same HOME by default — `.sfhome` is an empty shim
-# (no org aliases) and makes EntityDefinition lookups look like missing
-# referenceTo targets. Pass --sf-home only when a populated shim is required.
+# env helpers: Google steps need the real HOME (ADC); org steps need the sfhome
+# shim (keychain-linked) so the sf CLI can write its lock/cache files.
 # --------------------------------------------------------------------------- #
 def google_env(args) -> dict:
     e = os.environ.copy()

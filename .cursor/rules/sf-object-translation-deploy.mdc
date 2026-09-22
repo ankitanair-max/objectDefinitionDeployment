@@ -62,9 +62,7 @@ record types.
 - Deploy blank translations.
 - Use API name / JA source / placeholder / formula text as English.
 - Scan or modify tabs that were not selected.
-- Add a Google Workspace MCP sheet adapter — sheet I/O is the existing
-  `fetch_sheet.py` / `write_back.py` Google Sheets API client (same as every
-  other gated write in this repo).
+- Change `fetch_sheet.py` / `write_back.py` Google authentication.
 - Call Cloud Translation API, a service-account JSON, or an LLM to generate
   English labels.
 - Use Cursor/Claude/another LLM to generate translations.
