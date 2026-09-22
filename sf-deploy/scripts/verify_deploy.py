@@ -164,7 +164,7 @@ def verify_translations(plan: dict, org: str) -> bool:
                 print(f"      ✓ {loc}: {expected!r}")
             if t["kind"] == "ObjectLabel":
                 from translate_enrich import english_plural_label
-                expected_pl = (t.get("translation_plural") or english_plural_label(expected)).strip()
+                expected_pl = english_plural_label(expected).strip()
                 actual_pl = live.get("__object_plural__") or ""
                 if actual_pl != expected_pl:
                     ok = False

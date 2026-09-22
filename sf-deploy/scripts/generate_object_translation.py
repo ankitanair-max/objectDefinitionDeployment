@@ -99,13 +99,7 @@ def patch_tree(org: dict | None, overlays: dict[str, dict], obj: str,
         # Last resort so Name English can land. Header EN longer than 40 is
         # already swapped to Name EN in the plan (sheet cells are not rewritten).
         case_value = name_label
-    case_plural = ""
-    for e in overlays.values():
-        if e["component"] == obj and e["kind"] == KIND_OBJECT_LABEL:
-            case_plural = norm(e.get("translation_plural"))
-            break
-    if case_value and not case_plural:
-        case_plural = english_plural_label(case_value)
+    case_plural = english_plural_label(case_value) if case_value else ""
     if name_label and not starts:
         starts = starts_with_for(object_label or name_label)
     return {

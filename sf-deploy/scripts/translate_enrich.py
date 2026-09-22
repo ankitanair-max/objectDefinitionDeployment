@@ -226,6 +226,15 @@ def invalid_english(
         return f"placeholder English {text!r}"
     if len(text) > LABEL_MAX_LEN:
         return f"English exceeds Salesforce label limit ({len(text)}>{LABEL_MAX_LEN})"
+    api_n = norm(api)
+    if api_n and text.lower() in {api_n.lower(), api_n.lower().removesuffix("__c")}:
+        return "English is the API name"
+    ja_n = norm(ja)
+    if ja_n and text == ja_n:
+        if allow_same_as_ja_if_latin and not has_japanese(ja_n):
+            return ""
+        return "English is a copy of the Japanese source"
+    return ""
 
 
 def object_en_for_org(header_en: str, name_en: str) -> tuple[str, str]:
@@ -264,6 +273,10 @@ def _plural_word(word: str) -> str:
         return f"{pre}{out}{post}"
     if core.isupper() and core.isalpha() and len(core) <= 6:
         return f"{pre}{core}s{post}"
+    # Already plural (details, goods) — do not add "es". "class" (ss) and
+    # "bus"/"status" (us) still take the sibilant rule below.
+    if low.endswith("s") and not low.endswith(("ss", "us", "is")):
+        return word
     if low.endswith(("s", "x", "z", "ch", "sh")):
         return f"{pre}{core}es{post}"
     if len(core) > 1 and low.endswith("y") and low[-2] not in _VOWELS:
@@ -305,15 +318,6 @@ def english_plural_label(singular: str) -> str:
     if len(plural) > LABEL_MAX_LEN:
         return text
     return plural
-    api_n = norm(api)
-    if api_n and text.lower() in {api_n.lower(), api_n.lower().removesuffix("__c")}:
-        return "English is the API name"
-    ja_n = norm(ja)
-    if ja_n and text == ja_n:
-        if allow_same_as_ja_if_latin and not has_japanese(ja_n):
-            return ""
-        return "English is a copy of the Japanese source"
-    return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -1675,6 +1679,43 @@ def read_calculated(svc, sid: str, jobs: list[dict]) -> None:
             j["formula"] = False  # subsequent planning uses the calculated value
 
 
+def fill_org_object_descriptions(
+    object_rows: list[dict],
+    rows: list[dict],
+    provider_name: str,
+    deepl: DeepLProvider | None,
+) -> None:
+    """Set Object Description (EN) on in-memory rows for CustomObject.description.
+
+    The sheet 説明 cell is never written. DeepL only (same provider as labels);
+    Google batches skip this because GOOGLETRANSLATE would require a sheet cell.
+    """
+    ja_list, targets = [], []
+    for r in object_rows:
+        ja = norm(r.get("Object Description"))
+        # Sheet-layout notes (RT/VR/lookup columns removed) are not the
+        # object's business description — do not send them to the org.
+        if not ja or ("レコードタイプ" in ja and "入力規則" in ja):
+            continue
+        ja_list.append(ja)
+        targets.append(r)
+    if not targets or provider_name != ORIGIN_DEEPL or deepl is None:
+        return
+    ens = deepl.translate_batch(ja_list)
+    by_obj = {}
+    for r, en in zip(targets, ens):
+        en_n = norm(en)
+        if not en_n:
+            continue
+        r["Object Description (EN)"] = en_n
+        by_obj[norm(r.get("Object API Name"))] = en_n
+    for r in rows:
+        if r.get("_type") == "object_meta":
+            en_n = by_obj.get(norm(r.get("Object API Name")))
+            if en_n:
+                r["Object Description (EN)"] = en_n
+
+
 def merge_into_rows(rows: list[dict], jobs: list[dict]) -> list[dict]:
     by_obj_field = {(j["object_api"], j["field_api"], j["kind"]): j for j in jobs}
     for r in rows:
@@ -1748,6 +1789,7 @@ def run_enrichment(
             jobs, glossary, enr.provider if enr.provider in (ORIGIN_DEEPL, ORIGIN_GOOGLE)
             else ORIGIN_GOOGLE, deepl,
         )
+        fill_org_object_descriptions(object_rows, rows, enr.provider, deepl)
     except DeepLTranslateError as e:
         if deepl:
             deepl.close()

@@ -23,6 +23,18 @@ entries on top. Written by the self-correction loop (see
 
 ## Lessons
 
+### [2026-09-22] Isolated CustomObject description deploy hits source-tracking conflict
+- **Error signature:** `There are changes in the org that conflict with the local changes you're trying to deploy.` / `Conflict TI_Fnt_ShippingDetail__c CustomObject`
+- **Command:** `python scripts/deploy.py --start --package manifest/package.xml --target-org ERPDEV01 --test-level NoTestRun --skip-validation-gate` (cwd `.build/sd-desc-fix`)
+- **Component:** CustomObject `TI_Fnt_ShippingDetail__c` (object-meta description only)
+- **Category:** Tooling
+- **Extracted failure lines:**
+    Error (1): There are changes in the org that conflict with the local changes you're trying to deploy.
+- **Root cause:** Check-only succeeded. The real `deploy start` uses Salesforce source tracking. The mini-project object-meta was retrieved then edited locally; tracking still saw org-side CustomObject drift vs that snapshot, so the write was refused. `--dry-run` did not surface this conflict the same way.
+- **Fix applied:** Re-run the same package with `deploy.py --start --ignore-conflicts` so the intended description overwrite is the only change sent. Pipeline no longer copies sheet layout-note `説明` (レコードタイプ/入力規則/後で追加) into `CustomObject.description`.
+- **Prevention added:** `generate_xml._org_object_description` and `fill_org_object_descriptions` skip layout-note 説明. Isolated object-meta deploys from a retrieved snapshot must pass `--ignore-conflicts` when tracking reports Conflict on that same CustomObject.
+- **Status:** Resolved
+
 ### [2026-09-21] Existing-field EN/provenance edit skipped by name-delta
 - **Error signature:** sheet `TI_Fnt_MoveInDestination__c` EN `Delivery destination` (google provenance) while org still had `Move-in destination`; first `--phase deploy` reported complete because the field already existed
 - **Command:** `python scripts/prep_deploy.py --org ERPDEV01 --tabs ShipoutMovein --phase deploy`

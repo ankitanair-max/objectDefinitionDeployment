@@ -48,8 +48,14 @@ Object header (same object tab, typically row 1 — above the field list):
   uses the standard **Name** field English (`nameFieldLabel` row) for
   `CustomObjectTranslation.caseValues` singular. The sheet is left as-is.
 - Plural `caseValues` (`plural=true`) is an English plural of that singular
-  (slash compounds pluralize each side, then fit ≤40). It is not copied from
-  the singular and is not written to the sheet.
+  (slash compounds pluralize each side, then fit ≤40). Tokens that are already
+  plural (e.g. `details`) are left unchanged. It is not copied from the
+  singular and is not written to the sheet.
+- Object **Description** (`説明`) stays Japanese on the sheet. English for the
+  org is written only to `CustomObject.description` (not Translation Workbench,
+  not the sheet). A sheet `説明` that is a layout note (record types /
+  validation rules / lookup filters removed, add later) is NOT the object
+  description and must not be deployed.
 
 Field list (from the `fullName`/`type` header down to `END[項目]`):
 - `Field Label (EN)`
