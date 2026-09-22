@@ -24,6 +24,7 @@ from translate_enrich import (
     SF_LANG,
     esc,
     invalid_english,
+    english_plural_label,
     norm,
     parse_object_translation_el,
     starts_with_for,
@@ -95,13 +96,22 @@ def patch_tree(org: dict | None, overlays: dict[str, dict], obj: str,
             fields[key]["label"] = en
     case_value = object_label or case_carrier
     if name_label and not case_value:
-        # Last resort so Name English can land; do not invent object EN from AJ1.
+        # Last resort so Name English can land. Header EN longer than 40 is
+        # already swapped to Name EN in the plan (sheet cells are not rewritten).
         case_value = name_label
+    case_plural = ""
+    for e in overlays.values():
+        if e["component"] == obj and e["kind"] == KIND_OBJECT_LABEL:
+            case_plural = norm(e.get("translation_plural"))
+            break
+    if case_value and not case_plural:
+        case_plural = english_plural_label(case_value)
     if name_label and not starts:
         starts = starts_with_for(object_label or name_label)
     return {
         "object_label": object_label,
         "case_values_value": case_value,
+        "case_values_plural": case_plural,
         "name_field_label": name_label,
         "startsWith": starts,
         "fields": fields,
@@ -114,11 +124,20 @@ def render_object_file(model: dict) -> str:
     ]
     name_label = model.get("name_field_label") or ""
     case_value = model.get("case_values_value") or model.get("object_label") or ""
+    case_plural = model.get("case_values_plural") or english_plural_label(case_value)
     if name_label and not case_value:
         raise SystemExit(
             "⛔ nameFieldLabel requires a nonempty top-level caseValues value "
             "(Salesforce otherwise Succeeds without applying the Name translation)."
         )
+    if case_plural:
+        bad_pl = invalid_english(case_plural, ja="", api="")
+        if bad_pl:
+            raise SystemExit(f"⛔ refusing to package invalid plural English: {bad_pl}")
+        if case_plural == case_value:
+            raise SystemExit(
+                f"⛔ object plural English is identical to singular ({case_value!r})"
+            )
     if case_value:
         lines += [
             "    <caseValues>",
@@ -127,7 +146,7 @@ def render_object_file(model: dict) -> str:
             "    </caseValues>",
             "    <caseValues>",
             "        <plural>true</plural>",
-            f"        <value>{esc(case_value)}</value>",
+            f"        <value>{esc(case_plural or case_value)}</value>",
             "    </caseValues>",
         ]
     if name_label:

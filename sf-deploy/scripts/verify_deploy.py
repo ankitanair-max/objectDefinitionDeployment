@@ -109,7 +109,11 @@ def org_translation_labels(obj: str, org: str, lang: str = "en_US") -> dict:
         return {}
     rec, raw = recs[0]
     model = jsonable_translation(parse_object_translation_el(rec, obj, lang, raw_xml=raw))
-    labels = {"__object__": model.get("object_label") or "", "Name": model.get("name_field_label") or ""}
+    labels = {
+        "__object__": model.get("object_label") or "",
+        "__object_plural__": model.get("object_label_plural") or "",
+        "Name": model.get("name_field_label") or "",
+    }
     for name, f in (model.get("fields") or {}).items():
         labels[name] = f.get("label") or ""
     return labels
@@ -158,6 +162,15 @@ def verify_translations(plan: dict, org: str) -> bool:
                 print(f"      ✗ {loc}: org {actual!r} != sheet {expected!r}  [{tag}]")
             else:
                 print(f"      ✓ {loc}: {expected!r}")
+            if t["kind"] == "ObjectLabel":
+                from translate_enrich import english_plural_label
+                expected_pl = (t.get("translation_plural") or english_plural_label(expected)).strip()
+                actual_pl = live.get("__object_plural__") or ""
+                if actual_pl != expected_pl:
+                    ok = False
+                    print(f"      ✗ object plural: org {actual_pl!r} != {expected_pl!r}  [{tag}]")
+                else:
+                    print(f"      ✓ object plural: {expected_pl!r}")
     return ok
 
 

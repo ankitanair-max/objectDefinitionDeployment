@@ -226,6 +226,85 @@ def invalid_english(
         return f"placeholder English {text!r}"
     if len(text) > LABEL_MAX_LEN:
         return f"English exceeds Salesforce label limit ({len(text)}>{LABEL_MAX_LEN})"
+
+
+def object_en_for_org(header_en: str, name_en: str) -> tuple[str, str]:
+    """English packaged as CustomObjectTranslation caseValues.
+
+    Header Field Label (EN) is used when it fits the 40-char object-label
+    limit. If it is longer, Name-field English is used instead. Neither cell
+    is written back to the sheet.
+    """
+    header_n, name_n = norm(header_en), norm(name_en)
+    if header_n and len(header_n) > LABEL_MAX_LEN:
+        return name_n, "name_en"
+    return header_n, "header"
+
+
+_PLURAL_IRREGULAR = {
+    "person": "people", "man": "men", "woman": "women",
+    "child": "children", "mouse": "mice", "goose": "geese",
+    "leaf": "leaves", "life": "lives", "knife": "knives",
+}
+_VOWELS = set("aeiou")
+
+
+def _plural_word(word: str) -> str:
+    """English plural of one token. Preserves surrounding punctuation."""
+    m = re.match(r"^([^\w]*)(.*?)([^\w]*)$", word, flags=re.UNICODE)
+    if not m:
+        return word + "s"
+    pre, core, post = m.group(1), m.group(2), m.group(3)
+    if not core:
+        return word
+    low = core.lower()
+    irr = _PLURAL_IRREGULAR.get(low)
+    if irr:
+        out = irr.upper() if core.isupper() else (irr.capitalize() if core[:1].isupper() else irr)
+        return f"{pre}{out}{post}"
+    if core.isupper() and core.isalpha() and len(core) <= 6:
+        return f"{pre}{core}s{post}"
+    if low.endswith(("s", "x", "z", "ch", "sh")):
+        return f"{pre}{core}es{post}"
+    if len(core) > 1 and low.endswith("y") and low[-2] not in _VOWELS:
+        return f"{pre}{core[:-1]}ies{post}"
+    return f"{pre}{core}s{post}"
+
+
+def _pluralize_last_token(phrase: str) -> str:
+    tokens = phrase.split(" ")
+    tokens[-1] = _plural_word(tokens[-1])
+    return " ".join(tokens)
+
+
+def english_plural_label(singular: str) -> str:
+    """Plural English object name for caseValues plural=true. Never written to the sheet.
+
+    Slash compounds pluralize each side's last word. If that exceeds 40 characters,
+    only the final word is pluralized so the Salesforce label limit still holds.
+    """
+    text = norm(singular)
+    if not text:
+        return ""
+    parts = re.split(r"(\s*/\s*)", text)
+    built = []
+    for p in parts:
+        if not p or re.fullmatch(r"\s*/\s*", p):
+            built.append(p)
+            continue
+        built.append(_pluralize_last_token(p))
+    plural = "".join(built)
+    if plural == text:
+        plural = _pluralize_last_token(text)
+    if len(plural) > LABEL_MAX_LEN:
+        compact = re.sub(r"\s*/\s*", "/", plural)
+        if len(compact) <= LABEL_MAX_LEN:
+            plural = compact
+    if len(plural) > LABEL_MAX_LEN:
+        plural = _pluralize_last_token(text)
+    if len(plural) > LABEL_MAX_LEN:
+        return text
+    return plural
     api_n = norm(api)
     if api_n and text.lower() in {api_n.lower(), api_n.lower().removesuffix("__c")}:
         return "English is the API name"
@@ -527,9 +606,10 @@ def _direct_tag_text_comment(xml: str, tag: str) -> tuple[str, str]:
     return _text_and_comment(m.group(1))
 
 
-def _first_singular_case_value(xml: str) -> tuple[str, str]:
+def _first_case_value(xml: str, *, plural: bool) -> tuple[str, str]:
     for inner in re.findall(r"<caseValues>(.*?)</caseValues>", xml or "", flags=re.DOTALL):
-        if re.search(r"<plural>\s*true\s*</plural>", inner, flags=re.I):
+        is_plural = bool(re.search(r"<plural>\s*true\s*</plural>", inner, flags=re.I))
+        if is_plural != plural:
             continue
         vm = re.search(r"<value>(.*?)</value>", inner, flags=re.DOTALL)
         if vm:
@@ -547,13 +627,16 @@ def parse_object_translation_el(rec: ET.Element, obj: str, lang: str = SF_LANG,
     """
     fields: dict[str, dict] = {}
     raw = raw_xml or ET.tostring(rec, encoding="unicode")
-    object_label, object_label_comment = _first_singular_case_value(raw)
+    object_label, object_label_comment = _first_case_value(raw, plural=False)
+    object_label_plural, object_label_plural_comment = _first_case_value(raw, plural=True)
     if not object_label:
         for cv in rec.findall("caseValues"):
-            plural = (cv.findtext("plural") or "").lower() == "true"
+            is_pl = (cv.findtext("plural") or "").lower() == "true"
             val = norm(cv.findtext("value"))
-            if val and not plural:
+            if val and not is_pl:
                 object_label = val
+            elif val and is_pl and not object_label_plural:
+                object_label_plural = val
     name_field_label, name_field_label_comment = _direct_tag_text_comment(raw, "nameFieldLabel")
     if not name_field_label:
         name_field_label = norm(rec.findtext("nameFieldLabel") or "")
@@ -576,6 +659,8 @@ def parse_object_translation_el(rec: ET.Element, obj: str, lang: str = SF_LANG,
         "language": lang,
         "object_label": object_label,
         "object_label_comment": object_label_comment,
+        "object_label_plural": object_label_plural,
+        "object_label_plural_comment": object_label_plural_comment,
         "name_field_label": name_field_label,
         "name_field_label_comment": name_field_label_comment,
         "startsWith": starts,
@@ -730,6 +815,8 @@ def jsonable_translation(model: dict) -> dict:
         "language": model.get("language"),
         "object_label": model.get("object_label"),
         "object_label_comment": model.get("object_label_comment"),
+        "object_label_plural": model.get("object_label_plural"),
+        "object_label_plural_comment": model.get("object_label_plural_comment"),
         "name_field_label": model.get("name_field_label"),
         "startsWith": model.get("startsWith"),
         "fields": fields,
@@ -747,14 +834,16 @@ def entries_from_rows(rows: list[dict], lang: str = SF_LANG) -> list[dict]:
             continue
         src = f"object_tab:{r.get('_SheetName') or obj}"
         if r.get("_type") == "object_meta":
-            obj_en = norm(r.get("Object Label (EN)"))
+            obj_en, _via = object_en_for_org(
+                r.get("Object Label (EN)"), r.get("Name Field Label (EN)"))
             if obj_en:
+                # Header-level object name has no provenance stamp.
                 out.append(make_entry(
                     kind=KIND_OBJECT_LABEL, component=obj, key=obj, language=lang,
                     master=norm(r.get("Object Label")),
                     translation=obj_en,
-                    source=src, origin=norm(r.get("Object Translation Origin")),
-                    source_hash=norm(r.get("Object Translation Source Hash")),
+                    source=src, origin="", source_hash="",
+                    extra={"translation_plural": english_plural_label(obj_en)},
                 ))
             out.append(make_entry(
                 kind=KIND_NAME_FIELD, component=obj, key="Name", language=lang,
@@ -841,7 +930,15 @@ def classify_against_org(sheet_entries: list[dict], org_models: dict[str, dict],
             out.append(rec)
             continue
         rec["org_translation"] = org_label
-        if org_matches and last_matches:
+        if e["kind"] == KIND_OBJECT_LABEL:
+            expected_plural = e.get("translation_plural") or english_plural_label(en)
+            rec["translation_plural"] = expected_plural
+            org_plural = org_model.get("object_label_plural") or ""
+            rec["org_translation_plural"] = org_plural
+            plural_matches = bool(expected_plural) and content_hash(org_plural) == content_hash(expected_plural)
+        else:
+            plural_matches = True
+        if org_matches and last_matches and plural_matches:
             rec["code"] = UNCHANGED
             rec["package"] = False
             rec["reason"] = "sheet matches org"
@@ -849,10 +946,13 @@ def classify_against_org(sheet_entries: list[dict], org_models: dict[str, dict],
             continue
         rec["code"] = CHANGED
         rec["package"] = True
-        rec["reason"] = (
-            "sheet English differs from org" if not org_matches
-            else "sheet English differs from last deployed translation"
-        )
+        if e["kind"] == KIND_OBJECT_LABEL and org_matches and not plural_matches:
+            rec["reason"] = "object plural English differs from org"
+        else:
+            rec["reason"] = (
+                "sheet English differs from org" if not org_matches
+                else "sheet English differs from last deployed translation"
+            )
         out.append(rec)
     return out
 
@@ -1150,6 +1250,15 @@ def collect_tab(
     obj_hs, obj_hs_r, obj_hs_c = _find_meta_value(grid, meta_limit, OBJECT_HASH_LABEL)
     obj_gn, obj_gn_r, obj_gn_c = _find_meta_value(grid, meta_limit, OBJECT_GENERATED_LABEL)
     obj_ja, obj_ja_r, obj_ja_c = _find_meta_value(grid, meta_limit, "表示ラベル")
+    # Object header is the 表示ラベル row (typically row 1, value in col D).
+    # Object EN/provenance are that same row in the Field Label (EN) /
+    # Translation Provenance columns (field-header row is below this).
+    if obj_en_r < 0 and obj_ja_r >= 0 and en_col is not None:
+        obj_en = _cell(grid, obj_ja_r, en_col)
+        obj_en_r, obj_en_c = obj_ja_r, en_col
+    if obj_pv_r < 0 and obj_ja_r >= 0 and prov_col is not None:
+        obj_pv = _cell(grid, obj_ja_r, prov_col)
+        obj_pv_r, obj_pv_c = obj_ja_r, prov_col
     pv_o, pv_h, pv_t = parse_provenance(obj_pv)
     obj_or = pv_o or obj_or
     obj_hs = pv_h or obj_hs
@@ -1258,19 +1367,6 @@ def select_provider(
         return ORIGIN_GOOGLE, None
 
 
-def _ensure_object_meta_cell(loc: dict, key: str, label: str, header_row: int) -> dict:
-    """If a meta provenance/EN cell is missing, park it on the header-1 row."""
-    slot = loc[key]
-    if slot["row0"] >= 0 and slot["col0"] >= 0:
-        return slot
-    # Place on the row above the field header, appending to the right.
-    row0 = max(0, header_row - 2)
-    col0 = 10  # column K — meta block is typically A–J
-    slot = {"value": "", "row0": row0, "col0": col0, "create_label": label}
-    loc[key] = slot
-    return slot
-
-
 def build_jobs(locs: list[dict], object_rows: list[dict]) -> list[dict]:
     """In-scope translation jobs (object, Name, custom fields)."""
     jobs = []
@@ -1284,11 +1380,11 @@ def build_jobs(locs: list[dict], object_rows: list[dict]) -> list[dict]:
                 f"(comma-separated, e.g. Deal,Shipping)."
             )
         obj = norm(meta.get("Object API Name"))
-        # Object EN only from a labeled object-meta cell (表示ラベル (EN) /
-        # Object Label (EN)). Never Field Label (EN) column AJ on row 1.
+        # Object JA = 表示ラベル on the object-header row. Object EN = that
+        # same header row in the Field Label (EN) column.
         ja = loc["object_ja"]["value"] or norm(meta.get("Object Label"))
-        en = loc["object_en"]["value"] or ""
-        if loc["object_en"]["row0"] >= 0:
+        en = loc["object_en"]["value"] or norm(meta.get("Object Label (EN)"))
+        if ja:
             jobs.append({
                 "kind": KIND_OBJECT_LABEL,
                 "tab": tab,
@@ -1296,9 +1392,9 @@ def build_jobs(locs: list[dict], object_rows: list[dict]) -> list[dict]:
                 "field_api": obj,
                 "ja": ja,
                 "en": en,
-                "origin": loc["object_origin"]["value"],
-                "source_hash": loc["object_hash"]["value"],
-                "generated_at": loc["object_generated"]["value"],
+                "origin": loc["object_origin"]["value"] or norm(meta.get("Object Translation Origin")),
+                "source_hash": loc["object_hash"]["value"] or norm(meta.get("Object Translation Source Hash")),
+                "generated_at": loc["object_generated"]["value"] or norm(meta.get("Object Translation Generated At")),
                 "ja_a1": a1(loc["object_ja"]["col0"], loc["object_ja"]["row0"] + 1)
                 if loc["object_ja"]["row0"] >= 0 and loc["object_ja"]["col0"] >= 0 else "",
                 "en_a1": a1(loc["object_en"]["col0"], loc["object_en"]["row0"] + 1)
@@ -1360,6 +1456,11 @@ def enrich_jobs(
         j["old_hash"] = j.get("source_hash") or ""
         j["old_generated"] = j.get("generated_at") or ""
         if j.get("action") == "skip_flag":
+            j["action"] = "skip"
+            continue
+        # Object-header EN/provenance are never written. Over-limit header EN
+        # is resolved to Name EN only in the org package (object_en_for_org).
+        if j.get("kind") == KIND_OBJECT_LABEL:
             j["action"] = "skip"
             continue
         action = classify_need(j.get("ja", ""), j.get("en", ""),
@@ -1430,7 +1531,6 @@ def jobs_to_writes(jobs: list[dict], locs_by_tab: dict[str, dict]) -> list[CellW
         if action in {"skip", "block", "skip_flag"}:
             continue
         tab = j["tab"]
-        loc = locs_by_tab[tab]
         obj = j.get("object_api") or ""
         field = j.get("field_api") or ""
         ja = j.get("ja") or ""
@@ -1451,18 +1551,6 @@ def jobs_to_writes(jobs: list[dict], locs_by_tab: dict[str, dict]) -> list[CellW
             ))
 
         if j["kind"] == KIND_OBJECT_LABEL:
-            # No labeled object-EN cell → skip. Do not park J9/K9 or read AJ1.
-            if not j.get("en_a1"):
-                continue
-            add(j.get("en_a1"), j.get("old_en"), en_new, "en")
-            old_p = format_provenance(j.get("old_origin"), j.get("old_hash"), j.get("old_generated"))
-            new_p = format_provenance(j.get("origin"), j.get("source_hash"), j.get("generated_at"))
-            # Do not invent an object-provenance cell (AL9). Stamp only when the
-            # object-meta block already has one.
-            prov_cell = j.get("prov_a1")
-            if not prov_cell and loc.get("object_prov", {}).get("row0", -1) >= 0:
-                prov_cell = _meta_a1(loc, "object_prov", OBJECT_PROVENANCE_LABEL)
-            add(prov_cell, old_p, new_p, "provenance")
             continue
 
         # Name + custom fields share the field-row columns.
@@ -1476,11 +1564,6 @@ def jobs_to_writes(jobs: list[dict], locs_by_tab: dict[str, dict]) -> list[CellW
     for w in writes:
         seen[w.range] = w
     return list(seen.values())
-
-
-def _meta_a1(loc, key, label) -> str:
-    slot = _ensure_object_meta_cell(loc, key, label, loc["header_row"])
-    return a1(slot["col0"], slot["row0"] + 1)
 
 
 def header_writes(locs: list[dict]) -> list[CellWrite]:
@@ -1597,13 +1680,6 @@ def merge_into_rows(rows: list[dict], jobs: list[dict]) -> list[dict]:
     for r in rows:
         obj = norm(r.get("Object API Name"))
         if r.get("_type") == "object_meta":
-            j = by_obj_field.get((obj, obj, KIND_OBJECT_LABEL))
-            if j and j.get("en_new"):
-                r["Object Label (EN)"] = j["en_new"]
-                r["Object Translation Provenance"] = format_provenance(
-                    j.get("origin", ""), j.get("source_hash", ""), j.get("generated_at", ""))
-                r["Object Translation Origin"] = j.get("origin", "")
-                r["Object Translation Source Hash"] = j.get("source_hash", "")
             n = by_obj_field.get((obj, "Name", KIND_NAME_FIELD))
             if n and n.get("en_new"):
                 r["Name Field Label (EN)"] = n["en_new"]
@@ -1653,7 +1729,7 @@ def run_enrichment(
     # Provider preflight only if at least one label will need a provider.
     probe = []
     for j in jobs:
-        if j.get("action") == "skip_flag":
+        if j.get("action") == "skip_flag" or j.get("kind") == KIND_OBJECT_LABEL:
             continue
         act = classify_need(j.get("ja", ""), j.get("en", ""),
                             j.get("source_hash", ""), j.get("origin", ""))

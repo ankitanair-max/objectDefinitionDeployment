@@ -39,6 +39,19 @@ python scripts/prep_deploy.py --org "<ORG>" --tabs "<tab1>,<tab2>" --phase deplo
 
 ## Sheet columns (header-driven)
 
+Object header (same object tab, typically row 1 — above the field list):
+- `表示ラベル` (col A) / Japanese value (col D) = CustomObject singular+plural master
+- Object English = that **same header row** in the `Field Label (EN)` column
+- No provenance is generated for the object name (header row). Existing header
+  EN / Name EN cells are never overwritten for this.
+- If header object English is **longer than 40 characters**, the org package
+  uses the standard **Name** field English (`nameFieldLabel` row) for
+  `CustomObjectTranslation.caseValues` singular. The sheet is left as-is.
+- Plural `caseValues` (`plural=true`) is an English plural of that singular
+  (slash compounds pluralize each side, then fit ≤40). It is not copied from
+  the singular and is not written to the sheet.
+
+Field list (from the `fullName`/`type` header down to `END[項目]`):
 - `Field Label (EN)`
 - `Translation Provenance` — one cell immediately to the right of
   `Field Label (EN)`: `origin | ja-sha256 | generated-at`

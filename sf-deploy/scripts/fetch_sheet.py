@@ -279,13 +279,13 @@ def parse_object_header(grid: list[list], header_idx: int) -> dict:
     # Object-meta only: stop before the JP field-header row so field-column
     # labels (翻訳出典, 項目ラベル名 (EN)) are never read as object EN/provenance.
     meta_end = max(header_idx - 1, 0)
-    for row in grid[:meta_end]:
+    for ridx, row in enumerate(grid[:meta_end]):
         cells = [norm(c) for c in row]
         joined = [c for c in cells]
         for j, c in enumerate(cells):
             if c in ("表示ラベル (EN)", "表示ラベル(EN)", "Object Label (EN)"):
                 meta["Object Label (EN)"] = _first_nonblank(joined, j + 1)
-            elif c in ("Object Translation Provenance", "翻訳出典"):
+            elif c in ("Object Translation Provenance",):
                 meta["Object Translation Provenance"] = _first_nonblank(joined, j + 1)
             elif c in ("Object Translation Origin",):
                 meta["Object Translation Origin"] = _first_nonblank(joined, j + 1)
@@ -295,6 +295,7 @@ def parse_object_header(grid: list[list], header_idx: int) -> dict:
                 meta["Object Translation Generated At"] = _first_nonblank(joined, j + 1)
             elif c == "表示ラベル":
                 label = _first_nonblank(joined, j + 1)
+                meta["_ObjectHeaderRow"] = ridx
                 # オブジェクト名 label is usually further right on the same row
                 if "オブジェクト名" in cells:
                     k = cells.index("オブジェクト名")
@@ -366,6 +367,26 @@ def parse_tab(title: str, grid: list[list], object_api_hint: str = "") -> list[d
     obj_label = norm(obj_meta.get("Object Label")) or title
     obj_meta["Object API Name"] = obj_api
     obj_meta["Object Label"] = obj_label
+
+    # Object EN/provenance live on the object-header row (表示ラベル), in the
+    # Field Label (EN) / Translation Provenance columns — not a field row.
+    oh = obj_meta.get("_ObjectHeaderRow")
+    if oh is not None and 0 <= int(oh) < len(grid):
+        hdr_cells = [norm(c) for c in grid[int(oh)]]
+        en_idx = next((i for i, k in col_map.items() if k == "Field Label (EN)"), None)
+        pv_idx = next((i for i, k in col_map.items() if k == "Translation Provenance"), None)
+        if en_idx is not None and not obj_meta.get("Object Label (EN)"):
+            obj_meta["Object Label (EN)"] = hdr_cells[en_idx] if en_idx < len(hdr_cells) else ""
+        if pv_idx is not None and not obj_meta.get("Object Translation Provenance"):
+            obj_meta["Object Translation Provenance"] = (
+                hdr_cells[pv_idx] if pv_idx < len(hdr_cells) else "")
+        unpack_packed(
+            obj_meta,
+            packed_key="Object Translation Provenance",
+            origin_key="Object Translation Origin",
+            hash_key="Object Translation Source Hash",
+            gen_key="Object Translation Generated At",
+        )
 
     rows: list[dict] = []
     field_rows: list[dict] = []
