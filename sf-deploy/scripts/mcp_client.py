@@ -2,12 +2,7 @@
 """
 mcp_client.py — JSON-RPC client for an already-authenticated MCP server.
 
-Used for optional DeepL translation. A standalone Python process does NOT
-inherit Cursor/Claude MCP tool handles, so this talks to `mcp-adaptor` (or
-any MCP server) over stdio or streamable HTTP.
-
-Sheet I/O is NOT here — it uses the existing Google Sheets API client in
-fetch_sheet.py / write_back.py.
+Used for optional DeepL translation over stdio or streamable HTTP.
 """
 from __future__ import annotations
 

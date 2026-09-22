@@ -166,13 +166,6 @@ def main() -> int:
         print(f"❌ package manifest '{pkg}' not found — run build_manifest.py first.")
         return 1
 
-    proj = Path("sfdx-project.json")
-    if not proj.is_file():
-        print("❌ sfdx-project.json missing — this folder is not a Salesforce DX project.")
-        print("   sf project deploy requires sfdx-project.json in sf-deploy/ "
-              "(packageDirectories.path = force-app).")
-        return 1
-
     org = resolve_target_org(args.target_org, orgs)
     if not org:
         print("⛔ DEPLOY BLOCKED — no target org selected.")

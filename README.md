@@ -12,7 +12,7 @@ object-permission, and record-page automation.
 | `.cursor/rules/` | Mandatory pipeline rules (`.mdc`) — naming, deploy-delta, blockers, FLS/object-perms, FlexiPage 2-column, IsDelete/WIP handling, sheet-write gating, JA→en_US translation, etc. |
 | `.cursor/deployment_knowledge.md` | Deployment self-correction knowledge base (error → root-cause → fix lessons). |
 | `sf-deploy/scripts/` | Python pipeline scripts (fetch/validate sheet, name fields, generate XML, build manifest, deploy, verify, grant FLS/object-perms/tab-visibility, FlexiPage generation, drift checks, translation, etc.). |
-| `sf-deploy/README.md` | Pipeline usage notes. The canonical command remains `python scripts/prep_deploy.py --org … --tabs … --phase deploy`. |
+| `sf-deploy/README.md` | Pipeline usage notes. |
 
 ## Security
 

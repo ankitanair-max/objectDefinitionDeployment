@@ -30,10 +30,13 @@ validated, planned, deployed, and verified through THIS command. There is no
 parallel translation pipeline.
 
 Usage:
-  python scripts/prep_deploy.py --org ERPDEV01 --tabs "Deal,Shipping"
+  # safe: prepare + validate + dry-run a batch (no org writes)
+  python scripts/prep_deploy.py --org ERPDEV01 \
+      --tabs "諸掛明細: Sales_IncidentalExpensesDetail,単独諸掛:Sales_StandaloneIncidentalExpenses"
 
   python scripts/prep_deploy.py --org ERPDEV01 --phase deploy \
-      --tabs "Deal,Shipping" --apply-translations
+      --tabs "諸掛明細: Sales_IncidentalExpensesDetail,単独諸掛:Sales_StandaloneIncidentalExpenses" \
+      --apply-translations
 """
 from __future__ import annotations
 
@@ -181,8 +184,6 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str], dict]
     )
 
     rows = json.loads(temp_path.read_text(encoding="utf-8"))
-    fail_hook = bool(args.fail_deepl_after_preflight or
-                     os.environ.get("SF_FAIL_DEEPL_AFTER_PREFLIGHT"))
     try:
         enr = run_enrichment(
             spreadsheet_id=args.sheet_id,
@@ -190,7 +191,6 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str], dict]
             rows=rows,
             apply=bool(args.apply_translations),
             force_provider=args.force_provider,
-            fail_after_preflight=fail_hook,
         )
     except TranslationAbort as e:
         print(e)
@@ -284,8 +284,7 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str], dict]
         print("\n[5b] live English check (existing fields — name-delta is not enough)")
         cp = subprocess.run(
             ["python3", "scripts/verify_deploy.py", "--target-org", args.org,
-             "--objects", ",".join(objs), "--plan", str(DEPLOY_PLAN),
-             "--org-snapshot", str(ORG_SNAPSHOT)],
+             "--objects", ",".join(objs), "--plan", str(DEPLOY_PLAN)],
             env=sf_env(args), text=True)
         if cp.returncode != 0:
             raise SystemExit(
@@ -363,8 +362,7 @@ def deploy_phase(args, temp_path: Path, objs: list[str], tab_of: dict[str, str],
         print("  empty package — no metadata write. Still verifying sheet English vs org.")
         cp = subprocess.run(
             ["python3", "scripts/verify_deploy.py", "--target-org", args.org,
-             "--objects", ",".join(objs), "--plan", str(DEPLOY_PLAN),
-             "--org-snapshot", str(ORG_SNAPSHOT)],
+             "--objects", ",".join(objs), "--plan", str(DEPLOY_PLAN)],
             env=sf_env(args), text=True)
         if cp.returncode != 0:
             raise SystemExit(
@@ -400,8 +398,7 @@ def deploy_phase(args, temp_path: Path, objs: list[str], tab_of: dict[str, str],
     print("\n[2/3] live verification (objects, fields, exact English labels)")
     cp = subprocess.run(
         ["python3", "scripts/verify_deploy.py", "--target-org", args.org,
-         "--objects", ",".join(objs), "--plan", str(DEPLOY_PLAN),
-         "--org-snapshot", str(ORG_SNAPSHOT)],
+         "--objects", ",".join(objs), "--plan", str(DEPLOY_PLAN)],
         env=sf_env(args), text=True)
     if cp.returncode != 0:
         print("\n⛔ VERIFICATION FAILED — translations stay on the sheet; sync is NOT complete.")
@@ -440,8 +437,7 @@ def deploy_phase(args, temp_path: Path, objs: list[str], tab_of: dict[str, str],
 def main() -> int:
     ap = argparse.ArgumentParser(description="Gated batch Sheet->org deploy orchestrator")
     ap.add_argument("--org", required=True, help="target org alias/username")
-    ap.add_argument("--tabs", required=True,
-                    help="comma-separated object tab names (e.g. Deal,Shipping)")
+    ap.add_argument("--tabs", required=True, help="comma-separated object tab names")
     ap.add_argument("--phase", choices=["build", "deploy"], default="build")
     ap.add_argument("--test-level", default="NoTestRun")
     ap.add_argument("--sheet-id", default=DEFAULT_SHEET_ID)
@@ -453,9 +449,7 @@ def main() -> int:
     ap.add_argument("--apply-translations", action="store_true",
                     help="write the confirmed translation batch (gated sheet write)")
     ap.add_argument("--force-provider", default="", choices=["", "deepl", "google"],
-                    help="force DeepL or Google for this batch (tests / failover)")
-    ap.add_argument("--fail-deepl-after-preflight", action="store_true",
-                    help="test hook: pretends DeepL died mid-batch after a healthy preflight")
+                    help="force DeepL or Google for this batch")
     args = ap.parse_args()
 
     temp_path = Path(args.out)

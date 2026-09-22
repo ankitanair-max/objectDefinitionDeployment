@@ -82,7 +82,7 @@ entries on top. Written by the self-correction loop (see
     Error (InvalidProjectWorkspaceError): /Users/ankita.nair/Documents/objectDefinitionDeployment-main/sf-deploy does not contain a valid Salesforce DX project.
 - **Root cause:** `sf project deploy` requires a DX project file in the cwd. README listed `sf-deploy/sfdx-project.json` but the file was never in the repo, so check-only failed before any metadata was sent.
 - **Fix applied:** added `sf-deploy/sfdx-project.json` (`packageDirectories.path = force-app`, `sourceApiVersion` 60.0, matching `build_manifest.py` default).
-- **Prevention added:** `deploy.py` refuses to invoke `sf` unless `sfdx-project.json` is present in the working directory, with a clear missing-file error instead of the CLI workspace message.
+- **Prevention added:** keep `sf-deploy/sfdx-project.json` in the repo. `sf project deploy` already errors if it is missing.
 - **Status:** Resolved
 
 ### [2026-09-11] FLS grant was DELTA/local-file scoped → historical gaps never backfilled (106 fields across 11 objects)

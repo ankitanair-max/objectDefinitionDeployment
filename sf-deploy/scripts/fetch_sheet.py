@@ -33,7 +33,6 @@ import sys
 import warnings
 
 warnings.filterwarnings("ignore")
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # --------------------------------------------------------------------------- #
 # Column mapping: Row-12 API header (case-insensitive)  ->  temp_updates.json key
@@ -186,6 +185,21 @@ def parse_tab_list(raw: str) -> list[str]:
     return [t.strip() for t in str(raw or "").split(",") if t.strip()]
 
 
+def unpack_packed(rec: dict, packed_key: str, origin_key: str,
+                  hash_key: str, gen_key: str) -> None:
+    """Split a packed `origin | hash | generated-at` cell into the row dict."""
+    packed = str(rec.get(packed_key) or "").strip()
+    if not packed:
+        return
+    parts = [p.strip() for p in packed.split("|")]
+    if not str(rec.get(origin_key) or "").strip() and parts:
+        rec[origin_key] = parts[0]
+    if not str(rec.get(hash_key) or "").strip() and len(parts) > 1:
+        rec[hash_key] = parts[1]
+    if not str(rec.get(gen_key) or "").strip() and len(parts) > 2:
+        rec[gen_key] = parts[2]
+
+
 def find_header_row(grid: list[list]) -> int | None:
     """Return 0-based index of the API header row (has 'fullName' and 'type')."""
     for i, row in enumerate(grid[:20]):
@@ -319,8 +333,7 @@ def parse_object_header(grid: list[list], header_idx: int) -> dict:
         "enableHistory": eh,
         "enableSearch": es,
     })
-    from translate_enrich import unpack_provenance
-    unpack_provenance(
+    unpack_packed(
         meta,
         packed_key="Object Translation Provenance",
         origin_key="Object Translation Origin",
@@ -374,8 +387,7 @@ def parse_tab(title: str, grid: list[list], object_api_hint: str = "") -> list[d
                "_SheetRow": ridx + 1}
         for idx, key in col_map.items():
             rec[key] = cells[idx] if idx < len(cells) else ""
-        from translate_enrich import unpack_provenance
-        unpack_provenance(
+        unpack_packed(
             rec,
             packed_key="Translation Provenance",
             origin_key="Translation Origin",

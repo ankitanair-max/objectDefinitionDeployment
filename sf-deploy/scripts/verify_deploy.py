@@ -168,7 +168,6 @@ def main() -> int:
     ap.add_argument("--objects", default="", help="comma-separated <Obj>__c to verify")
     ap.add_argument("--all", action="store_true", help="verify every generated object")
     ap.add_argument("--plan", default="", help="deploy plan JSON (exact English verification)")
-    ap.add_argument("--org-snapshot", default="")
     args = ap.parse_args()
 
     only = {o.strip() for o in args.objects.split(",") if o.strip()} or None

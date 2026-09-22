@@ -19,7 +19,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 
 from mcp_deepl import DeepLProvider, DeepLTranslateError, DeepLUnavailable
 from write_back import get_write_service
@@ -1240,14 +1240,12 @@ def _write(tab, cell, old, new, mode, kind, field, obj, ja, ja_a1="", note="") -
 def select_provider(
     *,
     force: str = "",
-    deepl_factory: Callable[[], DeepLProvider] | None = None,
 ) -> tuple[str, DeepLProvider | None]:
     """Pick ONE provider for the whole batch. Never mix."""
     force = (force or "").strip().lower()
     if force == "google":
         return ORIGIN_GOOGLE, None
-    factory = deepl_factory or DeepLProvider
-    provider = factory()
+    provider = DeepLProvider()
     try:
         provider.preflight()
         return ORIGIN_DEEPL, provider
@@ -1349,8 +1347,6 @@ def enrich_jobs(
     glossary: dict,
     provider_name: str,
     deepl: DeepLProvider | None,
-    *,
-    fail_after_preflight: bool = False,
 ) -> tuple[list[dict], list[dict]]:
     """Fill English on jobs. DeepL translates the whole remainder first."""
     blocked: list[dict] = []
@@ -1396,9 +1392,6 @@ def enrich_jobs(
             continue
         j["via"] = "provider"
         need_provider.append(j)
-
-    if fail_after_preflight and provider_name == ORIGIN_DEEPL:
-        raise DeepLTranslateError("forced DeepL mid-batch failure (test hook)")
 
     if need_provider and provider_name == ORIGIN_DEEPL:
         if deepl is None:
@@ -1634,22 +1627,15 @@ def run_enrichment(
     rows: list[dict],
     apply: bool = False,
     force_provider: str = "",
-    fail_after_preflight: bool = False,
-    deepl_factory: Callable[[], DeepLProvider] | None = None,
-    grids: dict[str, list[list[str]]] | None = None,
-    svc=None,
 ) -> Enrichment:
     from fetch_sheet import parse_tab
 
     enr = Enrichment(spreadsheet_id=spreadsheet_id, tabs=list(tabs))
     locs = []
     parsed_all = []
+    svc = get_write_service()
     for tab in tabs:
-        grid = (grids or {}).get(tab) if grids else None
-        if grid is None:
-            if svc is None:
-                svc = get_write_service()
-            grid = _read_tab(svc, spreadsheet_id, tab)
+        grid = _read_tab(svc, spreadsheet_id, tab)
         parsed, loc = collect_tab(tab, grid, parse_tab_fn=parse_tab)
         parsed_all.extend(parsed)
         locs.append(loc)
@@ -1677,8 +1663,7 @@ def run_enrichment(
                 probe.append(j)
     deepl = None
     if probe:
-        enr.provider, deepl = select_provider(
-            force=force_provider, deepl_factory=deepl_factory)
+        enr.provider, deepl = select_provider(force=force_provider)
     else:
         enr.provider = force_provider or ORIGIN_MANUAL
 
@@ -1686,7 +1671,6 @@ def run_enrichment(
         jobs, blocked = enrich_jobs(
             jobs, glossary, enr.provider if enr.provider in (ORIGIN_DEEPL, ORIGIN_GOOGLE)
             else ORIGIN_GOOGLE, deepl,
-            fail_after_preflight=fail_after_preflight,
         )
     except DeepLTranslateError as e:
         if deepl:
@@ -1701,9 +1685,6 @@ def run_enrichment(
             deepl.close()
 
     enr.blocked = blocked
-    if blocked and any(b.get("reason", "").startswith("blank Japanese") for b in blocked):
-        # blank JA on an in-scope deployable field is a hard blocker
-        pass
 
     locs_by_tab = {loc["tab"]: loc for loc in locs}
     writes = header_writes(locs) + jobs_to_writes(jobs, locs_by_tab)
