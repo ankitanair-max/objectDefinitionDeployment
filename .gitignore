@@ -17,6 +17,11 @@ __pycache__/
 *.pem
 *.key
 *.p12
+.env
+.env.*
+!.env.example
+*.secret
+**/secrets/
 
 # ── Build / transient artifacts ──────────────────────────────────
 **/.build/

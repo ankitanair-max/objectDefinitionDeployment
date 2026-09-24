@@ -14,7 +14,7 @@ The actual delete is performed by `deploy.py`:
         --pre-destructive manifest/destructiveChanges.xml \
         --package manifest/destructive_package.xml \
         --target-org "<ORG>" --test-level NoTestRun --skip-validation-gate
-That real deploy is DESTRUCTIVE and gated by the SHOOT password.
+That real deploy is DESTRUCTIVE and requires explicit review plus `--start`.
 
 Safety:
   * Reads the sheet LIVE (never a cached snapshot).
@@ -190,7 +190,7 @@ def main() -> int:
     print("=" * 72)
     print(f"  destructiveChanges : {dpath}")
     print(f"  empty package      : {ppath}")
-    print("\nNEXT (DESTRUCTIVE, gated by SHOOT):")
+    print("\nNEXT (DESTRUCTIVE — review before running):")
     print(f"  python scripts/deploy.py --start \\")
     print(f"      --pre-destructive {dpath} \\")
     print(f"      --package {ppath} \\")

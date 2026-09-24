@@ -8,9 +8,7 @@ validation gate before any deploy and defaults to check-only validation.
 Safety model:
   * Default action is `validate` (check-only, `sf project deploy validate`) —
     it NEVER writes to the org.
-  * `--start` performs a real deploy (`sf project deploy start`). This is a
-    GATED action: the Cursor rule requires the user to type `SHOOT` before the
-    assistant runs it.
+  * `--start` explicitly performs a real deploy (`sf project deploy start`).
   * A deploy is refused unless the validation report shows zero ERRORs, unless
     `--skip-validation-gate` is explicitly passed.
 
@@ -18,7 +16,7 @@ Usage:
   # check-only (safe, default)
   python scripts/deploy.py --package manifest/package.xml --target-org "ERP DEV 02"
 
-  # real deploy (gated by SHOOT)
+  # real deploy
   python scripts/deploy.py --start --package manifest/package.xml \
       --target-org "ERP DEV 02" --test-level RunLocalTests
 

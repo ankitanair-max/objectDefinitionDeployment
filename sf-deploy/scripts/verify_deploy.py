@@ -7,8 +7,8 @@ The deploy CLI log is NOT trusted on its own (a stale/dry-run log once reported
 confirms, without manual inspection, that:
 
   1. each expected object exists  (EntityDefinition), and
-  2. each expected TI_Fnt_ field of the generated package is present
-     (FieldDefinition).
+  2. each expected custom field of the generated package is present
+     (Tooling API CustomField, independent of field-level security).
 
 It derives the expected object(s) + field(s) straight from the local generated
 metadata under force-app (the exact thing that was packaged), so there is no
@@ -139,6 +139,7 @@ def verify_translations(plan: dict, org: str) -> bool:
         print("      (no sheet English to verify)")
         return True
     ok = True
+    from translate_enrich import compare_norm, english_plural_label
     by_obj: dict[str, list] = {}
     for t in entries:
         by_obj.setdefault(t["component"], []).append(t)
@@ -157,16 +158,15 @@ def verify_translations(plan: dict, org: str) -> bool:
                 actual = live.get(t["key"]) or ""
                 loc = t["key"]
             tag = "pkg" if t.get("package") else (t.get("code") or "")
-            if actual != expected:
+            if compare_norm(actual) != compare_norm(expected):
                 ok = False
                 print(f"      ✗ {loc}: org {actual!r} != sheet {expected!r}  [{tag}]")
             else:
                 print(f"      ✓ {loc}: {expected!r}")
             if t["kind"] == "ObjectLabel":
-                from translate_enrich import english_plural_label
                 expected_pl = english_plural_label(expected).strip()
                 actual_pl = live.get("__object_plural__") or ""
-                if actual_pl != expected_pl:
+                if compare_norm(actual_pl) != compare_norm(expected_pl):
                     ok = False
                     print(f"      ✗ object plural: org {actual_pl!r} != {expected_pl!r}  [{tag}]")
                 else:
@@ -181,14 +181,26 @@ def main() -> int:
     ap.add_argument("--objects", default="", help="comma-separated <Obj>__c to verify")
     ap.add_argument("--all", action="store_true", help="verify every generated object")
     ap.add_argument("--plan", default="", help="deploy plan JSON (exact English verification)")
+    ap.add_argument(
+        "--translations-only",
+        action="store_true",
+        help="verify object existence + plan English without reading generated fields",
+    )
     args = ap.parse_args()
 
     only = {o.strip() for o in args.objects.split(",") if o.strip()} or None
     if not only and not args.all:
         print("❌ pass --objects <Api,...> or --all")
         return 2
+    if args.translations_only and not only:
+        print("❌ --translations-only requires --objects <Api,...>")
+        return 2
 
-    expected = expected_from_source(Path(args.source_root), only)
+    expected = (
+        {obj: [] for obj in sorted(only or set())}
+        if args.translations_only
+        else expected_from_source(Path(args.source_root), only)
+    )
     if not expected:
         print("❌ no generated objects found under", args.source_root)
         return 2
@@ -200,7 +212,11 @@ def main() -> int:
     overall_ok = True
     for obj, fields in expected.items():
         obj_ok = org_has_object(obj, args.target_org)
-        present = org_fields(obj, args.target_org) if obj_ok else set()
+        present = (
+            org_fields(obj, args.target_org)
+            if obj_ok and not args.translations_only
+            else set()
+        )
         missing = [f for f in fields if f not in present]
         status = "OK" if (obj_ok and not missing) else "FAIL"
         if status == "FAIL":

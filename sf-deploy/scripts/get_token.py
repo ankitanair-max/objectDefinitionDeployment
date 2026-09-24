@@ -13,11 +13,45 @@ Usage:
   python scripts/get_token.py --alias ERPDEV01 [--out .build/orgauth.json]
 """
 from __future__ import annotations
-import argparse, json, os, subprocess, sys, urllib.parse, urllib.request, urllib.error
+import argparse, json, os, pwd, subprocess, sys, urllib.parse, urllib.request, urllib.error
 from pathlib import Path
 
-HOME = os.path.expanduser("~")
-SF_CLIENT = f"{HOME}/.local/share/sf/client/current"
+
+def _real_home() -> Path:
+    try:
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except Exception:
+        return Path.home()
+
+
+def _homes() -> list[Path]:
+    out: list[Path] = []
+    for raw in (os.environ.get("SF_HOME"), os.environ.get("HOME"), str(_real_home())):
+        if not raw:
+            continue
+        p = Path(os.path.expanduser(raw))
+        if p not in out:
+            out.append(p)
+    return out
+
+
+def _sfdx_dir() -> Path:
+    for h in _homes():
+        d = h / ".sfdx"
+        if d.is_dir():
+            return d
+    return Path.home() / ".sfdx"
+
+
+def _sf_client() -> Path:
+    for h in _homes():
+        p = h / ".local" / "share" / "sf" / "client" / "current"
+        if (p / "bin" / "node").is_file():
+            return p
+    return Path.home() / ".local" / "share" / "sf" / "client" / "current"
+
+
+SF_CLIENT = str(_sf_client())
 NODE = f"{SF_CLIENT}/bin/node"
 CORE = f"{SF_CLIENT}/node_modules/@salesforce/core"
 
@@ -39,12 +73,14 @@ const { Crypto } = require(path.join(process.env.CORE, 'lib/crypto/crypto.js'));
 
 
 def _alias_to_username(alias: str) -> str:
-    # aliases live in ~/.sfdx/alias.json ({"orgs": {alias: username}})
-    ap = Path(HOME) / ".sfdx" / "alias.json"
-    if ap.exists():
-        m = json.loads(ap.read_text()).get("orgs", {})
-        if alias in m:
-            return m[alias]
+    # aliases live in ~/.sfdx/alias.json. HOME may be a .sfhome shim; also
+    # try the real user home so translation snapshot/verify still mint a token.
+    for h in _homes():
+        ap = h / ".sfdx" / "alias.json"
+        if ap.exists():
+            m = json.loads(ap.read_text()).get("orgs", {})
+            if alias in m:
+                return m[alias]
     return alias  # assume it's already a username
 
 
@@ -64,13 +100,21 @@ def main() -> int:
     args = ap.parse_args()
 
     user = _alias_to_username(args.alias)
-    authfile = Path(HOME) / ".sfdx" / f"{user}.json"
+    authfile = _sfdx_dir() / f"{user}.json"
+    if not authfile.exists():
+        for h in _homes():
+            cand = h / ".sfdx" / f"{user}.json"
+            if cand.exists():
+                authfile = cand
+                break
     if not authfile.exists():
         print(f"❌ auth file not found: {authfile} (run: sf org login web -a {args.alias} -r https://test.salesforce.com)")
         return 1
 
+    auth_home = str(authfile.parent.parent)
     env = {**os.environ, "CORE": CORE, "AUTHFILE": str(authfile),
-           "NODE_PATH": f"{SF_CLIENT}/node_modules"}
+           "NODE_PATH": f"{SF_CLIENT}/node_modules", "HOME": auth_home}
+    env.pop("SF_HOME", None)
     p = subprocess.run([NODE, "-e", DECRYPT_JS], capture_output=True, text=True, env=env)
     if p.returncode != 0:
         print("❌ decrypt failed:", p.stderr[:300]); return 1

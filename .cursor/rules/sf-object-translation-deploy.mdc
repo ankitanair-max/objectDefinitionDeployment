@@ -1,6 +1,6 @@
 ---
 description: Automatic JA→en_US object/field label translation runs inside prep_deploy.py (Translation Workbench). Never a parallel command.
-globs: sf-deploy/scripts/{prep_deploy,translate_enrich,generate_object_translation,mcp_deepl,mcp_client,fetch_sheet,write_back,validate_sheet,build_manifest,verify_deploy}.py
+globs: sf-deploy/scripts/{prep_deploy,translate_enrich,generate_object_translation,mcp_deepl,mcp_client,secret_resolver,fetch_sheet,write_back,validate_sheet,build_manifest,verify_deploy}.py
 alwaysApply: false
 ---
 
@@ -25,7 +25,13 @@ python scripts/prep_deploy.py --org "<ORG>" --tabs "<tab1>,<tab2>" --phase deplo
 2. Structural pre-validation + collect labels that need English.
 3. Provider preflight: DeepL MCP if healthy, else Google Sheets `GOOGLETRANSLATE`.
    One provider per batch; never mix. DeepL failure after preflight is fatal
-   (no Google fallback, no partial write).
+   (no Google fallback, no partial write). DeepL resolves its key without prompts
+   from `DEEPL_API_KEY`, a locked-down `DEEPL_API_KEY_FILE`, macOS Keychain
+   (`sf-deploy/deepl`), or `DEEPL_API_KEY_COMMAND`, in that order. The key remains
+   in process memory and is passed only to the MCP child; Cursor `mcp.json` is not
+   read. Tool arguments come from `tools/list` `inputSchema` (official
+   `deepl-mcp-server` uses `sourceLangCode`/`targetLangCode` with `ja`/`en-US`).
+   Stdio supports NDJSON and LSP Content-Length.
 4. Terminology: API-name match → standard field map → unique JA→EN on the
    selected tabs → provider.
 5. One confirmation for the complete sheet-write batch (headers, EN, provenance).
@@ -53,9 +59,12 @@ Object header (same object tab, typically row 1 — above the field list):
   singular and is not written to the sheet.
 - Object **Description** (`説明`) stays Japanese on the sheet. English for the
   org is written only to `CustomObject.description` (not Translation Workbench,
-  not the sheet). A sheet `説明` that is a layout note (record types /
-  validation rules / lookup filters removed, add later) is NOT the object
-  description and must not be deployed.
+  not the sheet). DeepL can fill that in-memory EN; **Google batches skip it**
+  because GOOGLETRANSLATE would require a sheet cell. A sheet `説明` that is a
+  layout note (record types / validation rules / lookup filters removed, add
+  later) is NOT the object description and must not be deployed. Description
+  translation does not force an otherwise translation-only existing object into
+  the schema package; it lands when that CustomObject is already in scope.
 
 Field list (from the `fullName`/`type` header down to `END[項目]`):
 - `Field Label (EN)`

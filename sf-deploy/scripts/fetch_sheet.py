@@ -268,6 +268,27 @@ def build_col_map(header_row: list, jp_header_row: list | None = None) -> dict[i
     return col_map
 
 
+OBJECT_META_LABELS = {
+    "表示ラベル", "オブジェクト名", "説明", "レポートを許可", "活動を許可",
+    "項目履歴管理", "検索を許可", "タブ作成 (create tab)",
+    "表示ラベル (EN)", "表示ラベル(EN)", "Object Label (EN)",
+    "Object Translation Provenance", "Object Translation Origin",
+    "Object Translation Source Hash", "Object Translation Generated At",
+}
+
+
+def _meta_value(cells: list[str], start: int) -> str:
+    """Read within one object-header region, stopping at the next label."""
+    known = {norm(x).rstrip(":").lower() for x in OBJECT_META_LABELS}
+    for value in cells[start:]:
+        clean = norm(value)
+        if clean.rstrip(":").lower() in known:
+            return ""
+        if clean and not clean.endswith(":"):
+            return clean
+    return ""
+
+
 def parse_object_header(grid: list[list], header_idx: int) -> dict:
     """Extract object-level metadata (rows above the field header row).
 
@@ -284,24 +305,24 @@ def parse_object_header(grid: list[list], header_idx: int) -> dict:
         joined = [c for c in cells]
         for j, c in enumerate(cells):
             if c in ("表示ラベル (EN)", "表示ラベル(EN)", "Object Label (EN)"):
-                meta["Object Label (EN)"] = _first_nonblank(joined, j + 1)
+                meta["Object Label (EN)"] = _meta_value(joined, j + 1)
             elif c in ("Object Translation Provenance",):
-                meta["Object Translation Provenance"] = _first_nonblank(joined, j + 1)
+                meta["Object Translation Provenance"] = _meta_value(joined, j + 1)
             elif c in ("Object Translation Origin",):
-                meta["Object Translation Origin"] = _first_nonblank(joined, j + 1)
+                meta["Object Translation Origin"] = _meta_value(joined, j + 1)
             elif c in ("Object Translation Source Hash",):
-                meta["Object Translation Source Hash"] = _first_nonblank(joined, j + 1)
+                meta["Object Translation Source Hash"] = _meta_value(joined, j + 1)
             elif c in ("Object Translation Generated At",):
-                meta["Object Translation Generated At"] = _first_nonblank(joined, j + 1)
+                meta["Object Translation Generated At"] = _meta_value(joined, j + 1)
             elif c == "表示ラベル":
-                label = _first_nonblank(joined, j + 1)
+                label = _meta_value(joined, j + 1)
                 meta["_ObjectHeaderRow"] = ridx
                 # オブジェクト名 label is usually further right on the same row
                 if "オブジェクト名" in cells:
                     k = cells.index("オブジェクト名")
-                    api = _first_nonblank(joined, k + 1)
+                    api = _meta_value(joined, k + 1)
             elif c == "説明":
-                desc = _first_nonblank(joined, j + 1)
+                desc = _meta_value(joined, j + 1)
             elif c == "レポートを許可":
                 # value row is typically the next grid row; handled below
                 pass
@@ -342,13 +363,6 @@ def parse_object_header(grid: list[list], header_idx: int) -> dict:
         gen_key="Object Translation Generated At",
     )
     return meta
-
-
-def _first_nonblank(cells: list[str], start: int) -> str:
-    for c in cells[start:]:
-        if norm(c):
-            return norm(c)
-    return ""
 
 
 def parse_tab(title: str, grid: list[list], object_api_hint: str = "") -> list[dict]:

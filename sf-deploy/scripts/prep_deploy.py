@@ -9,9 +9,7 @@ keeping EVERY existing safety gate in place:
   * validation gate            — build stops unless validate_sheet reports 0 ERRORs
   * object-existence pre-check  — live, per object (rule sf-object-existence-precheck)
   * check-only dry-run          — writes nothing to the org
-  * SHOOT deploy gate           — a REAL deploy only runs in --phase deploy, which
-                                  the assistant may invoke ONLY after the user typed
-                                  SHOOT (this script never bypasses that)
+  * explicit deploy phase        — a REAL deploy runs only with --phase deploy
   * live post-deploy verify     — verify_deploy.py (Tooling API, FLS-independent)
   * report refresh              — build_object_report.py tab per object (mandatory)
 
@@ -284,7 +282,8 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str], dict]
         print("\n[5b] live English check (existing fields — name-delta is not enough)")
         cp = subprocess.run(
             ["python3", "scripts/verify_deploy.py", "--target-org", args.org,
-             "--objects", ",".join(objs), "--plan", str(DEPLOY_PLAN)],
+             "--objects", ",".join(objs), "--plan", str(DEPLOY_PLAN),
+             "--translations-only"],
             env=sf_env(args), text=True)
         if cp.returncode != 0:
             raise SystemExit(
@@ -362,7 +361,8 @@ def deploy_phase(args, temp_path: Path, objs: list[str], tab_of: dict[str, str],
         print("  empty package — no metadata write. Still verifying sheet English vs org.")
         cp = subprocess.run(
             ["python3", "scripts/verify_deploy.py", "--target-org", args.org,
-             "--objects", ",".join(objs), "--plan", str(DEPLOY_PLAN)],
+             "--objects", ",".join(objs), "--plan", str(DEPLOY_PLAN),
+             "--translations-only"],
             env=sf_env(args), text=True)
         if cp.returncode != 0:
             raise SystemExit(

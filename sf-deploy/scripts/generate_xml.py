@@ -58,7 +58,8 @@ def _org_object_description(row: dict) -> str:
     if en:
         return en
     ja = str(row.get("Object Description") or "").strip()
-    if "レコードタイプ" in ja and "入力規則" in ja:
+    layout_markers = ("レコードタイプ", "入力規則", "ルックアップ検索条件")
+    if sum(marker in ja for marker in layout_markers) >= 2:
         return ""
     return ja
 

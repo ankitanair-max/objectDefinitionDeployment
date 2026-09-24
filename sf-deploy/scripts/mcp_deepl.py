@@ -20,8 +20,21 @@ from mcp_client import (
 )
 
 
+# DeepL REST-style codes (some MCP servers). Official deepl-mcp-server wants ISO.
 SOURCE_LANG = "JA"
 TARGET_LANG = "EN-US"
+ISO_SOURCE = "ja"
+ISO_TARGET = "en-US"
+
+_TEXT_KEYS = ("text", "texts", "input", "content", "q")
+_SRC_KEYS = (
+    "sourceLangCode", "source_lang_code", "sourceLang", "source_lang",
+    "from", "source",
+)
+_TGT_KEYS = (
+    "targetLangCode", "target_lang_code", "targetLang", "target_lang",
+    "to", "target",
+)
 
 
 class DeepLUnavailable(McpUnavailable):
@@ -32,32 +45,99 @@ class DeepLTranslateError(McpError):
     """DeepL accepted preflight then failed to translate the batch."""
 
 
-def _tool_names(tools: list[dict]) -> list[str]:
-    out = []
-    for t in tools:
-        name = (t.get("name") or t.get("toolName") or "").strip()
-        if name:
-            out.append(name)
-    return out
+def _tool_name(t: dict) -> str:
+    return (t.get("name") or t.get("toolName") or "").strip()
 
 
-def pick_translate_tool(tools: list[dict]) -> str:
-    names = _tool_names(tools)
+def pick_translate_tool(tools: list[dict]) -> dict:
+    """Return the translate tool descriptor (name + inputSchema)."""
     preferred = (
         "translate_text", "translate-text", "deepl_translate",
         "translate", "translations",
     )
-    lower = {n.lower(): n for n in names}
+    by_lower = {_tool_name(t).lower(): t for t in tools if _tool_name(t)}
     for p in preferred:
-        if p in lower:
-            return lower[p]
-    for n in names:
-        if "translat" in n.lower():
-            return n
+        if p in by_lower:
+            return by_lower[p]
+    for t in tools:
+        if "translat" in _tool_name(t).lower():
+            return t
+    names = [_tool_name(t) for t in tools if _tool_name(t)]
     raise DeepLUnavailable(
         "DeepL MCP is reachable but exposes no translate tool "
         f"(tools: {names or 'none'})"
     )
+
+
+def _input_schema(tool: dict | None) -> dict:
+    if not tool:
+        return {}
+    return tool.get("inputSchema") or tool.get("parameters") or {}
+
+
+def _pick_enum(enum: list, *candidates: str) -> str:
+    low = {str(x).lower(): str(x) for x in enum}
+    for c in candidates:
+        if c.lower() in low:
+            return low[c.lower()]
+    raise DeepLUnavailable(
+        f"DeepL MCP language enum does not support {candidates[0]!r}"
+    )
+
+
+def _lang_value(key: str, spec: dict, iso: str, deepl: str) -> str:
+    enum = spec.get("enum") if isinstance(spec, dict) else None
+    if enum:
+        return _pick_enum(list(enum), iso, deepl)
+    if "code" in key.lower():
+        return iso
+    return deepl
+
+
+def translate_args(text: str, tool: dict | None = None) -> dict:
+    """Build tool arguments from tools/list inputSchema only.
+
+    Official deepl-mcp-server (translate-text) wants sourceLangCode /
+    targetLangCode with ISO-639 values (ja / en-US). Extra shotgun keys
+    are rejected when additionalProperties is false.
+    """
+    schema = _input_schema(tool)
+    props = schema.get("properties") or {}
+    if not props:
+        return {
+            "text": text,
+            "sourceLangCode": ISO_SOURCE,
+            "targetLangCode": ISO_TARGET,
+        }
+    args: dict[str, Any] = {}
+    text_key = ""
+    for k in _TEXT_KEYS:
+        if k not in props:
+            continue
+        spec = props[k] if isinstance(props[k], dict) else {}
+        args[k] = [text] if spec.get("type") == "array" or k == "texts" else text
+        text_key = k
+        break
+    if not text_key:
+        raise DeepLUnavailable(
+            "DeepL MCP translate tool has no supported text property in inputSchema"
+        )
+    for keys, iso, deepl in (
+        (_SRC_KEYS, ISO_SOURCE, SOURCE_LANG),
+        (_TGT_KEYS, ISO_TARGET, TARGET_LANG),
+    ):
+        for k in keys:
+            if k in props:
+                spec = props[k] if isinstance(props[k], dict) else {}
+                args[k] = _lang_value(k, spec, iso, deepl)
+                break
+    missing = [str(k) for k in schema.get("required") or [] if k not in args]
+    if missing:
+        raise DeepLUnavailable(
+            "DeepL MCP translate schema has unsupported required properties: "
+            + ", ".join(missing)
+        )
+    return args
 
 
 class DeepLProvider:
@@ -69,6 +149,7 @@ class DeepLProvider:
         self._client = client
         self._owns = client is None
         self._tool = ""
+        self._tool_meta: dict = {}
         self._healthy = False
 
     def close(self) -> None:
@@ -79,12 +160,18 @@ class DeepLProvider:
     def preflight(self) -> None:
         """Raise DeepLUnavailable unless the MCP server is configured + healthy."""
         if self._client is None:
-            self._client = deepl_client()
+            try:
+                self._client = deepl_client()
+            except (McpUnavailable, McpAuthError, McpError) as e:
+                raise DeepLUnavailable(
+                    f"DeepL MCP configuration failed: {e}"
+                ) from e
             if self._client is None:
                 raise DeepLUnavailable(
-                    "DeepL MCP is not configured (set MCP_DEEPL_COMMAND / "
-                    "MCP_DEEPL_SERVER / MCP_DEEPL_URL). Google Translate will "
-                    "be used for this batch if selected at preflight."
+                    "No usable DeepL key or MCP transport was resolved. Configure "
+                    "DEEPL_API_KEY, DEEPL_API_KEY_FILE, macOS Keychain service "
+                    "'sf-deploy/deepl', or DEEPL_API_KEY_COMMAND. Google Translate "
+                    "will be used for this batch if selected at preflight."
                 )
             try:
                 self._client.start()
@@ -94,8 +181,13 @@ class DeepLProvider:
             tools = self._client.list_tools()
         except (McpUnavailable, McpAuthError, McpError) as e:
             raise DeepLUnavailable(f"DeepL MCP tools/list failed: {e}") from e
-        self._tool = pick_translate_tool(tools)
+        self._tool_meta = pick_translate_tool(tools)
+        self._tool = _tool_name(self._tool_meta)
         self._healthy = True
+        framing = getattr(self._client, "framing", "") or ""
+        keys = ",".join(translate_args("x", self._tool_meta).keys())
+        print(f"      DeepL MCP: tool={self._tool} args=[{keys}]"
+              f"{f' framing={framing}' if framing else ''}")
 
     def translate_batch(self, texts: list[str]) -> list[str]:
         """Translate every item JA→EN-US. Any blank/malformed result is fatal."""
@@ -128,29 +220,23 @@ class DeepLProvider:
 
     def _translate_one(self, text: str) -> str:
         assert self._client is not None
-        raw = self._client.call_tool(self._tool, _translate_args(text))
+        raw = self._client.call_tool(
+            self._tool, translate_args(text, self._tool_meta))
         return _extract_text(raw)
-
-
-def _translate_args(text: str) -> dict:
-    # Cover the common DeepL MCP argument names without coupling to one server.
-    return {
-        "text": text,
-        "texts": [text],
-        "source_lang": SOURCE_LANG,
-        "target_lang": TARGET_LANG,
-        "sourceLang": SOURCE_LANG,
-        "targetLang": TARGET_LANG,
-        "from": SOURCE_LANG,
-        "to": TARGET_LANG,
-    }
 
 
 def _extract_text(raw: Any) -> str:
     if raw is None:
         return ""
     if isinstance(raw, str):
-        return raw.strip()
+        lines = raw.strip().splitlines()
+        metadata_prefixes = (
+            "Detected source language:",
+            "Target language used:",
+        )
+        while lines and lines[-1].strip().startswith(metadata_prefixes):
+            lines.pop()
+        return "\n".join(lines).strip()
     if isinstance(raw, list):
         if not raw:
             return ""
@@ -172,5 +258,5 @@ def _extract_text(raw: Any) -> str:
                 if isinstance(item, dict) and item.get("type") == "text":
                     chunks.append(item.get("text") or "")
             if chunks:
-                return "\n".join(chunks).strip()
+                return _extract_text("\n".join(chunks))
     return str(raw).strip()

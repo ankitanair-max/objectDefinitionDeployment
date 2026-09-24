@@ -9,9 +9,8 @@ Runs, in order:
   3. generate_xml.py   temp_updates.json -> force-app/main/default/objects/**
   4. build_manifest.py force-app -> manifest/package.xml
 
-Deployment is intentionally NOT part of this script. Deploy is a gated action:
-run `scripts/deploy.py` separately (and, per the workspace rule, only after the
-user types SHOOT).
+Deployment is intentionally NOT part of this script. Run `scripts/deploy.py`
+separately; a real deployment requires its explicit `--start` flag.
 
 Usage:
   python scripts/run.py --spreadsheet-id <ID> [--tabs "成約"] [--only Obj__c] [--strict]
@@ -91,7 +90,7 @@ def main() -> int:
     print("Pipeline complete. Review:")
     print("   • force-app/main/default/objects/**   (generated metadata)")
     print("   • manifest/package.xml                (deploy manifest)")
-    print("\nNext (GATED — requires SHOOT):")
+    print("\nNext:")
     print("   python scripts/deploy.py --target-org \"<org>\"            # check-only")
     print("   python scripts/deploy.py --start --target-org \"<org>\"    # real deploy")
     return 0

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""
+r"""
 build_manifest.py — Generate a Salesforce deploy manifest (package.xml) and,
 optionally, a destructiveChanges.xml, from the local `force-app` source tree.
 

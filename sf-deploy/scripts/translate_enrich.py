@@ -114,6 +114,14 @@ def norm(s: Any) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+def compare_norm(s: Any) -> str:
+    """Comparison-only normalization; never use it to rewrite source text."""
+    t = unicodedata.normalize("NFKC", str(s or ""))
+    t = t.replace("\u3000", " ").replace("\xa0", " ")
+    t = t.translate({0xFF08: ord("("), 0xFF09: ord(")"), 0xFF0F: ord("/")})
+    return re.sub(r"\s+", " ", t).strip()
+
+
 def content_hash(s: str) -> str:
     t = norm(s)
     if not t:
@@ -1190,18 +1198,28 @@ def _cell(grid, r0, c) -> str:
     return cell_at(grid, r0, c)
 
 
+_META_LABELS = {
+    "表示ラベル", "オブジェクト名", "説明", "レポートを許可", "活動を許可",
+    "項目履歴管理", "検索を許可", "タブ作成 (create tab)",
+}
+
+
 def _find_meta_value(grid: list[list[str]], header_idx: int, *labels: str) -> tuple[str, int, int]:
     """Return (value, row0, col0) for a labeled cell in the object-meta block."""
-    want = {norm(x).lower() for x in labels}
+    want = {norm(x).rstrip(":").lower() for x in labels}
+    known_labels = {norm(x).rstrip(":").lower() for x in _META_LABELS}
     for r in range(header_idx):
         row = grid[r] if r < len(grid) else []
         for c, val in enumerate(row):
-            if norm(val).lower() in want:
-                # value is the next non-blank to the right
+            if norm(val).rstrip(":").lower() in want:
+                # A value belongs only to this logical header region. If the
+                # next metadata label appears first, the intended value is
+                # blank; never borrow that label's value or the object API.
                 for k in range(c + 1, max(len(row) + 4, c + 8)):
                     v = cell_at(grid, r, k)
-                    # skip if the next cell is itself a known label
-                    if v and norm(v).lower() not in want and not v.endswith(":"):
+                    if norm(v).rstrip(":").lower() in known_labels:
+                        break
+                    if v and not v.endswith(":"):
                         return v, r, k
                 return "", r, c + 1
     return "", -1, -1
@@ -1362,11 +1380,12 @@ def select_provider(
     try:
         provider.preflight()
         return ORIGIN_DEEPL, provider
-    except DeepLUnavailable:
+    except DeepLUnavailable as exc:
         if force == "deepl":
             raise TranslationAbort(
-                "⛔ DeepL was required (--force-provider deepl) but preflight failed."
-            )
+                "⛔ DeepL was required (--force-provider deepl) but preflight "
+                f"failed: {exc}"
+            ) from exc
         provider.close()
         return ORIGIN_GOOGLE, None
 
@@ -1695,7 +1714,8 @@ def fill_org_object_descriptions(
         ja = norm(r.get("Object Description"))
         # Sheet-layout notes (RT/VR/lookup columns removed) are not the
         # object's business description — do not send them to the org.
-        if not ja or ("レコードタイプ" in ja and "入力規則" in ja):
+        layout_markers = ("レコードタイプ", "入力規則", "ルックアップ検索条件")
+        if not ja or sum(marker in ja for marker in layout_markers) >= 2:
             continue
         ja_list.append(ja)
         targets.append(r)
@@ -1750,10 +1770,23 @@ def run_enrichment(
     enr = Enrichment(spreadsheet_id=spreadsheet_id, tabs=list(tabs))
     locs = []
     parsed_all = []
+    api_hints = {
+        norm(r.get("_SheetName")): norm(r.get("Object API Name"))
+        for r in rows
+        if r.get("_type") == "object_meta"
+    }
     svc = get_write_service()
     for tab in tabs:
         grid = _read_tab(svc, spreadsheet_id, tab)
-        parsed, loc = collect_tab(tab, grid, parse_tab_fn=parse_tab)
+        parsed, loc = collect_tab(
+            tab,
+            grid,
+            parse_tab_fn=lambda title, values: parse_tab(
+                title,
+                values,
+                object_api_hint=api_hints.get(norm(title), ""),
+            ),
+        )
         parsed_all.extend(parsed)
         locs.append(loc)
         if loc.get("missing_headers"):
@@ -1779,10 +1812,13 @@ def run_enrichment(
             if not en:
                 probe.append(j)
     deepl = None
-    if probe:
+    # An explicit provider choice is itself a preflight request. In
+    # particular, --force-provider deepl must fail without a usable key/server
+    # even when every label is already translated.
+    if probe or force_provider:
         enr.provider, deepl = select_provider(force=force_provider)
     else:
-        enr.provider = force_provider or ORIGIN_MANUAL
+        enr.provider = ORIGIN_MANUAL
 
     try:
         jobs, blocked = enrich_jobs(
