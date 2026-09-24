@@ -529,10 +529,14 @@ class McpClient:
         if "structuredContent" in result:
             return result["structuredContent"]
         if text:
-            try:
-                return json.loads(text)
-            except json.JSONDecodeError:
-                return text
+            # Only containers are decoded: a translation of "null", "true" or
+            # "123" is text, not a JSON scalar.
+            if text.lstrip()[:1] in ("{", "["):
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError:
+                    pass
+            return text
         return result
 
 
