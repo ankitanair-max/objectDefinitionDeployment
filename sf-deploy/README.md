@@ -134,6 +134,15 @@ is already part of the package (for example, object creation). It does not force
 an otherwise translation-only existing object into the schema package. Blank
 values and sheet-layout notes are never invented or deployed as descriptions.
 
+Japanese labels follow the sheet. For existing objects, `prep_deploy.py` compares
+the sheet's `Object Label`, `Name Field Label` and every custom `Field Label`
+with the org (`readMetadata`) and packages each difference (`LABELS (JA)` in the
+delta output); `verify_deploy.py --plan` fails if a relabel did not land. The
+relabel is built from the org's current definition with only the label replaced
+(`label_sync.py`), so type/formula/picklist drift is still reported by
+`attr_drift.py` and never redeployed as a side effect. Relabelling an object
+pushes its local field files too, so those are pinned to their org definitions.
+
 `sfdx-project.json` `sourceApiVersion` is the **package** API (60.0). SOAP tokens
 from `get_token.py` use the org’s `instanceApiVersion` (often 64/68). That is
 intentional, not a mismatch to “fix.”

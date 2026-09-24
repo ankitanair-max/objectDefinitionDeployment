@@ -180,6 +180,10 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str], dict]
         org_id_from_display, plan_has_members, save_sync_state,
         build_plan, snapshot_translations, write_plan, print_delta,
     )
+    from label_sync import (
+        add_label_members, apply_label_patches, label_deltas, print_label_delta,
+        save_snapshot as save_label_snapshot, sheet_master_labels, snapshot_master_labels,
+    )
 
     rows = json.loads(temp_path.read_text(encoding="utf-8"))
     try:
@@ -273,10 +277,15 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str], dict]
         provider=enr.provider, present_objects=present,
         present_fields=present_fields, org_translations=org_t,
     )
+    # Japanese labels: the sheet is master, so any org-side edit is overwritten.
+    org_masters = snapshot_master_labels(sorted(present), args.org)
+    save_label_snapshot(org_masters)
+    add_label_members(plan, label_deltas(sheet_master_labels(rows), org_masters, present))
     write_plan(plan, DEPLOY_PLAN)
     print(f"      provider={plan.get('provider')}  empty={plan.get('empty')}  "
           f"members={ {k: len(v) for k, v in (plan.get('members') or {}).items()} }")
     print_delta(plan)
+    print_label_delta(plan)
 
     if plan.get("empty"):
         print("\n[5b] live English check (existing fields — name-delta is not enough)")
@@ -303,6 +312,8 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str], dict]
     run(["python3", "scripts/generate_object_translation.py",
          "--plan", str(DEPLOY_PLAN), "--org-snapshot", str(ORG_SNAPSHOT)],
         os.environ.copy(), capture=True)
+    for patched in apply_label_patches(plan, org_masters, OBJECTS_ROOT):
+        print(f"      JA label patch (org definition + sheet label): {patched}")
 
     # 7) manifest FROM THE PLAN (not a directory scan)
     print("\n[7/8] build manifest from immutable plan")

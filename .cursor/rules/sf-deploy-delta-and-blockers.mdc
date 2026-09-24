@@ -159,6 +159,17 @@ and deploy ONLY the new (and, if explicitly requested, changed) fields.
    `verify_deploy.py` compares **every** in-scope sheet English value to the live
    org — not only the rows that happened to be in this package — so a later EN
    edit cannot be reported as "complete" while the org still has the old label.
+3d. **JAPANESE LABEL DRIFT — THE SHEET OVERWRITES THE ORG (automatic).** The
+   sheet is the master for Japanese labels. For every existing object,
+   `prep_deploy.py` compares the sheet `Object Label`, `Name Field Label` and
+   each custom `Field Label` with the org (`readMetadata`, FLS-independent) and
+   packages every difference, printed as `LABELS (JA)`. An org-side Japanese
+   edit must never silently survive a deploy. `label_sync.py` builds the relabel
+   from the org's CURRENT definition with only `<label>` replaced, so it never
+   redeploys attribute drift (§3b stays a user decision). Relabelling an object
+   also pins its local field files to the org definition, because a CustomObject
+   source deploy pushes every child field file. `verify_deploy.py --plan` fails
+   if a planned relabel did not land.
 4. **Report the delta before deploying:** e.g. "org already has N fields; sheet
    defines M; deploying the D new ones; X already present (skipped); Y org-only
    (left untouched)." **Also report translation new/changed.** Keep the schema

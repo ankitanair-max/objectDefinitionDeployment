@@ -8,7 +8,9 @@ confirms, without manual inspection, that:
 
   1. each expected object exists  (EntityDefinition), and
   2. each expected custom field of the generated package is present
-     (Tooling API CustomField, independent of field-level security).
+     (Tooling API CustomField, independent of field-level security), and
+  3. with --plan, every planned English translation and Japanese relabel
+     matches the org.
 
 It derives the expected object(s) + field(s) straight from the local generated
 metadata under force-app (the exact thing that was packaged), so there is no
@@ -234,6 +236,10 @@ def main() -> int:
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
             trans_ok = verify_translations(plan, args.target_org)
             if not trans_ok:
+                overall_ok = False
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from label_sync import verify_labels
+            if not verify_labels(plan, args.target_org):
                 overall_ok = False
 
     print("\n" + "=" * 72)
