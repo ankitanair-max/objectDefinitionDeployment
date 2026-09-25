@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp_deepl import DeepLProvider, DeepLTranslateError, DeepLUnavailable
+from secret_resolver import isolated_child_env
 from write_back import get_write_service
 
 NS = "http://soap.sforce.com/2006/04/metadata"
@@ -754,7 +755,7 @@ def load_token(org: str, token_file: str = ".build/orgauth.json") -> dict:
     import subprocess, sys
     cp = subprocess.run(
         ["python3", "scripts/get_token.py", "--alias", org, "--out", token_file],
-        text=True, capture_output=True)
+        text=True, capture_output=True, env=isolated_child_env())
     if cp.returncode != 0:
         raise SystemExit(f"❌ get_token failed: {cp.stderr[:400] or cp.stdout[:400]}")
     return json.loads(Path(token_file).read_text())["result"]
@@ -802,7 +803,7 @@ def org_id_from_display(org: str) -> str:
     import subprocess
     cp = subprocess.run(
         ["sf", "org", "display", "--target-org", org, "--json"],
-        text=True, capture_output=True)
+        text=True, capture_output=True, env=isolated_child_env())
     try:
         data = json.loads(cp.stdout or "{}")
     except json.JSONDecodeError:

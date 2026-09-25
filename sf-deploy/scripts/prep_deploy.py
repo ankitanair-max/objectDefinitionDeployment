@@ -46,6 +46,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from secret_resolver import isolated_child_env
+
 DEFAULT_SHEET_ID = "1_TaxDe-Qxl8BAUmuZc01vUoxpBEPxJ4Opx4tEe8ulNQ"
 OBJECTS_ROOT = Path("force-app/main/default/objects")
 TRANSLATIONS_ROOT = Path("force-app/main/default/objectTranslations")
@@ -63,19 +65,23 @@ SYNC_STATE = Path(".build/translation_sync_state.json")
 # shim (keychain-linked) so the sf CLI can write its lock/cache files.
 # --------------------------------------------------------------------------- #
 def google_env(args) -> dict:
-    e = os.environ.copy()
+    e = isolated_child_env(allow_google_credentials=True)
     e["HOME"] = args.google_home
     e.pop("XDG_DATA_HOME", None)
     return e
 
 
 def sf_env(args) -> dict:
-    e = os.environ.copy()
+    e = isolated_child_env()
     e["HOME"] = args.sf_home
     e["XDG_DATA_HOME"] = args.xdg_data_home
     e["SF_DISABLE_LOG_FILE"] = "true"
     e["SFDX_DISABLE_LOG_FILE"] = "true"
     return e
+
+
+def generic_env() -> dict:
+    return isolated_child_env()
 
 
 def run(cmd: list[str], env: dict, *, capture: bool = False, check: bool = True) -> subprocess.CompletedProcess:
@@ -308,10 +314,10 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str], dict]
     for o in objs:
         shutil.rmtree(OBJECTS_ROOT / o, ignore_errors=True)
         shutil.rmtree(TRANSLATIONS_ROOT / f"{o}-en_US", ignore_errors=True)
-    run(["python3", "scripts/generate_xml.py"], os.environ.copy(), capture=True)
+    run(["python3", "scripts/generate_xml.py"], generic_env(), capture=True)
     run(["python3", "scripts/generate_object_translation.py",
          "--plan", str(DEPLOY_PLAN), "--org-snapshot", str(ORG_SNAPSHOT)],
-        os.environ.copy(), capture=True)
+        generic_env(), capture=True)
     for patched in apply_label_patches(plan, org_masters, OBJECTS_ROOT):
         print(f"      JA label patch (org definition + sheet label): {patched}")
 
@@ -319,7 +325,7 @@ def build_phase(args, temp_path: Path) -> tuple[list[str], dict[str, str], dict]
     print("\n[7/8] build manifest from immutable plan")
     run(["python3", "scripts/build_manifest.py",
          "--out", str(PACKAGE), "--plan", str(DEPLOY_PLAN)],
-        os.environ.copy(), capture=True)
+        generic_env(), capture=True)
 
     # 8) existence pre-check + check-only dry-run
     print("\n[8/8] object-existence pre-check + check-only dry-run")

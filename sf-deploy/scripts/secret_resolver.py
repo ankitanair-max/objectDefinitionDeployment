@@ -16,6 +16,12 @@ from typing import Mapping
 
 KEYCHAIN_SERVICE = "sf-deploy/deepl"
 MAX_SECRET_BYTES = 8192
+DEEPL_SECRET_ENV_VARS = (
+    "DEEPL_API_KEY",
+    "DEEPL_API_KEY_FILE",
+    "DEEPL_API_KEY_COMMAND",
+)
+GOOGLE_SECRET_ENV_VARS = ("GOOGLE_SERVICE_ACCOUNT_JSON",)
 
 
 class SecretResolutionError(RuntimeError):
@@ -29,6 +35,21 @@ class ResolvedSecret:
 
     def __repr__(self) -> str:
         return f"ResolvedSecret(value=<redacted>, source={self.source!r})"
+
+
+def isolated_child_env(
+    environ: Mapping[str, str] | None = None,
+    *,
+    allow_google_credentials: bool = False,
+) -> dict[str, str]:
+    """Build a child environment without unrelated credential sources."""
+    child = dict(os.environ if environ is None else environ)
+    for name in DEEPL_SECRET_ENV_VARS:
+        child.pop(name, None)
+    if not allow_google_credentials:
+        for name in GOOGLE_SECRET_ENV_VARS:
+            child.pop(name, None)
+    return child
 
 
 def _clean(value: str, source: str) -> ResolvedSecret:
@@ -123,9 +144,7 @@ def _from_command(raw_command: str, timeout: float) -> ResolvedSecret:
         raise SecretResolutionError("DEEPL_API_KEY_COMMAND is malformed") from exc
     if not argv:
         raise SecretResolutionError("DEEPL_API_KEY_COMMAND is empty")
-    env = os.environ.copy()
-    for name in ("DEEPL_API_KEY", "DEEPL_API_KEY_FILE", "DEEPL_API_KEY_COMMAND"):
-        env.pop(name, None)
+    env = isolated_child_env()
     try:
         cp = subprocess.run(
             argv,

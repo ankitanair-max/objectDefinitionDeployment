@@ -19,7 +19,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from secret_resolver import SecretResolutionError, resolve_deepl_api_key
+from secret_resolver import (
+    SecretResolutionError,
+    isolated_child_env,
+    resolve_deepl_api_key,
+)
 
 MAX_MCP_MESSAGE_BYTES = 8 * 1024 * 1024
 
@@ -126,11 +130,9 @@ class McpClient:
     def _spawn(self) -> None:
         self.close()
         cmd = [self.command, *self.args]
-        merged = os.environ.copy()
+        merged = isolated_child_env()
         # Resolver controls these inputs; the child receives only the resolved
         # key, never local file paths or secret-manager commands.
-        merged.pop("DEEPL_API_KEY_FILE", None)
-        merged.pop("DEEPL_API_KEY_COMMAND", None)
         if self.env:
             merged.update(self.env)
         try:
